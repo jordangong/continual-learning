@@ -133,4 +133,4 @@ if __name__ == '__main__':
 
     trainer.fit(model, datamodule=dm, ckpt_path=args.resume_ckpt_path)
     if args.val_split == 0:
-        trainer.test(datamodule=dm, ckpt_path="best")
+        trainer.test(datamodule=dm, ckpt_path="last")
