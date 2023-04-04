@@ -4,7 +4,8 @@ from argparse import ArgumentParser
 import pytorch_lightning as pl
 from lightning_fabric import seed_everything
 from torch import nn, optim
-from torchmetrics import Accuracy
+from torchmetrics import MetricCollection
+from torchmetrics.classification import MulticlassAccuracy
 from torchvision.models import resnet18
 
 from datamodule import cifar10aug
@@ -41,59 +42,46 @@ class CIFARResNet(pl.LightningModule):
         encoder.conv1 = nn.Conv2d(3, 64, kernel_size=3, padding=1, bias=False)
         encoder.maxpool = nn.Identity()
         self.encoder = encoder
-        self.classifiers = nn.ModuleList([copy.deepcopy(encoder.fc)])
+        self.classifiers = nn.ModuleList(copy.deepcopy(encoder.fc))
         self.encoder.fc = nn.Identity()
 
         self.loss = nn.CrossEntropyLoss()
 
-        self.train_acc1 = Accuracy("multiclass", num_classes=num_classes, top_k=1)
-        self.train_acc5 = Accuracy("multiclass", num_classes=num_classes, top_k=5)
-        self.val_acc1 = Accuracy("multiclass", num_classes=num_classes, top_k=1,
-                                 computer_on_step=False)
-        self.val_acc5 = Accuracy("multiclass", num_classes=num_classes, top_k=5,
-                                 computer_on_step=False)
-        self.test_acc1 = Accuracy("multiclass", num_classes=num_classes, top_k=1,
-                                  computer_on_step=False)
-        self.test_acc5 = Accuracy("multiclass", num_classes=num_classes, top_k=5,
-                                  computer_on_step=False)
+        metrics = MetricCollection({
+            "acc/top1": MulticlassAccuracy(num_classes, top_k=1),
+            "acc/top5": MulticlassAccuracy(num_classes, top_k=5),
+        })
+        self.train_acc = metrics.clone(postfix="/train")
+        self.val_acc = metrics.clone(postfix="/val")
+        self.test_acc = metrics.clone(postfix="/test")
 
-    def shared_step(self, batch, acc1, acc5):
+    def shared_step(self, batch, acc):
         img, target = batch
         logits = self.classifiers[0](self.encoder(img))
         loss = self.loss(logits, target)
-        acc1 = acc1(logits.softmax(-1), target)
-        acc5 = acc5(logits.softmax(-1), target)
+        acc = acc(logits.softmax(-1), target)
 
-        return loss, acc1, acc5
+        return loss, acc
 
     def training_step(self, batch, batch_idx):
-        loss, acc1, acc5 = self.shared_step(batch, self.train_acc1, self.train_acc5)
-
-        self.log_dict({
-            "loss/train": loss,
-            "acc/train/top1": acc1,
-            "acc/train/top5": acc5,
-        }, sync_dist=True)
+        loss, acc = self.shared_step(batch, self.train_acc)
+        self.log("loss/train", loss, sync_dist=True)
+        self.log_dict(self.train_acc, sync_dist=True)
         return loss
 
     def validation_step(self, batch, batch_idx):
-        loss, acc1, acc5 = self.shared_step(batch, self.val_acc1, self.val_acc5)
-
-        self.log_dict({
-            "loss/val": loss,
-            "hp_metric": acc1,
-            "acc/val/top1": acc1,
-            "acc/val/top5": acc5,
-        }, sync_dist=True)
+        loss, acc = self.shared_step(batch, self.val_acc)
+        self.log("loss/val", loss, sync_dist=True)
+        self.log_dict(self.val_acc, sync_dist=True)
         return loss
 
-    def test_step(self, batch, batch_idx):
-        loss, acc1, acc5 = self.shared_step(batch, self.test_acc1, self.test_acc5)
+    def on_validation_epoch_end(self):
+        acc = self.val_acc.compute()
+        self.log_dict({"hp_metric": acc["acc/top1/val"]}, sync_dist=True)
 
-        self.log_dict({
-            "acc/test/top1": acc1,
-            "acc/test/top5": acc5,
-        }, sync_dist=True)
+    def test_step(self, batch, batch_idx):
+        loss, acc = self.shared_step(batch, self.test_acc)
+        self.log_dict(self.test_acc, sync_dist=True)
         return loss
 
     def configure_optimizers(self):

@@ -1,4 +1,4 @@
-from argparse import ArgumentParser, BooleanOptionalAction
+from argparse import ArgumentParser
 
 from pytorch_lightning import Trainer
 from pytorch_lightning.callbacks import LearningRateMonitor, ModelCheckpoint
@@ -9,8 +9,9 @@ def get_default_parser(*args, **kwargs):
     parser = ArgumentParser(*args, **kwargs)
     parser.add_argument("--version", default=None, type=str)
     parser.add_argument("--log_path", default="lightning_logs", type=str)
+    parser.add_argument("--wandb", default=False, action="store_true")
     parser.add_argument("--resume_ckpt_path", default=None, type=str)
-    parser.add_argument("--track_grad", default=False, action=BooleanOptionalAction)
+    parser.add_argument("--track_grad", default=False, action="store_true")
 
     return parser
 
@@ -19,7 +20,7 @@ def get_logger(args, name=None):
     logger = [TensorBoardLogger(save_dir="lightning_logs",
                                 name=name,
                                 version=args.version)]
-    if not args.fast_dev_run:
+    if args.wandb and not args.fast_dev_run:
         wandb_logger = WandbLogger(save_dir="lightning_logs",
                                    name=name,
                                    version=args.version,
