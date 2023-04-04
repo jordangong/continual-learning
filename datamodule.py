@@ -4,8 +4,10 @@ from typing import Any, Callable, List, Optional, Union
 
 import torch
 from pytorch_lightning import LightningDataModule
+from torch import nn
 from torch.utils.data import DataLoader, Dataset, random_split
 from torchvision.datasets import CIFAR10
+from torchvision.transforms import transforms
 
 
 class VisionDataModule(LightningDataModule):
@@ -294,3 +296,42 @@ class CIFAR10DataModule(VisionDataModule):
             10
         """
         return 10
+
+
+def cifar10aug(args):
+    dm = CIFAR10DataModule(
+        data_dir=args.data_dir,
+        val_split=args.val_split,
+        batch_size=args.batch_size,
+        num_workers=args.num_workers
+    )
+    args.num_samples = dm.num_samples
+    args.num_classes = dm.num_classes
+
+    normalize = transforms.Normalize(
+        mean=[x / 255.0 for x in [125.3, 123.0, 113.9]],
+        std=[x / 255.0 for x in [63.0, 62.1, 66.7]],
+    )
+
+    dm.train_transforms = transforms.Compose([
+        transforms.RandomResizedCrop(32),
+        transforms.ToTensor(),
+        torch.jit.script(nn.Sequential(
+            transforms.RandomHorizontalFlip(p=0.5),
+            transforms.ColorJitter(
+                brightness=0.2,
+                contrast=0.2,
+                saturation=0.2,
+                hue=0.2,
+            ),
+            transforms.RandomGrayscale(p=0.2),
+            normalize,
+        )),
+    ])
+    dm.val_transforms = dm.test_transforms = transforms.Compose([
+        transforms.Resize(32),
+        transforms.ToTensor(),
+        torch.jit.script(normalize),
+    ])
+
+    return dm
