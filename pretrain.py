@@ -49,10 +49,14 @@ class CIFARResNet(pl.LightningModule):
 
         self.train_acc1 = Accuracy("multiclass", num_classes=num_classes, top_k=1)
         self.train_acc5 = Accuracy("multiclass", num_classes=num_classes, top_k=5)
-        self.val_acc1 = Accuracy("multiclass", num_classes=num_classes, top_k=1, computer_on_step=False)
-        self.val_acc5 = Accuracy("multiclass", num_classes=num_classes, top_k=5, computer_on_step=False)
-        self.test_acc1 = Accuracy("multiclass", num_classes=num_classes, top_k=1, computer_on_step=False)
-        self.test_acc5 = Accuracy("multiclass", num_classes=num_classes, top_k=5, computer_on_step=False)
+        self.val_acc1 = Accuracy("multiclass", num_classes=num_classes, top_k=1,
+                                 computer_on_step=False)
+        self.val_acc5 = Accuracy("multiclass", num_classes=num_classes, top_k=5,
+                                 computer_on_step=False)
+        self.test_acc1 = Accuracy("multiclass", num_classes=num_classes, top_k=1,
+                                  computer_on_step=False)
+        self.test_acc5 = Accuracy("multiclass", num_classes=num_classes, top_k=5,
+                                  computer_on_step=False)
 
     def shared_step(self, batch, acc1, acc5):
         img, target = batch
@@ -184,7 +188,8 @@ if __name__ == '__main__':
         project="continual-learning",
     )
     lr_monitor = LearningRateMonitor(logging_interval="step")
-    model_checkpoint = ModelCheckpoint(monitor="loss/val", save_last=True, save_top_k=5)
+    model_checkpoint = ModelCheckpoint(monitor="loss/val",
+                                       save_last=True, save_top_k=5)
 
     callbacks = [lr_monitor, model_checkpoint]
     trainer = Trainer(

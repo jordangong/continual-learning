@@ -36,14 +36,15 @@ class VisionDataModule(LightningDataModule):
         """
         Args:
             data_dir: Where to save/load the data
-            val_split: Percent (float) or number (int) of samples to use for the validation split
+            val_split: Percent (float) or number (int) of samples
+                       to use for the validation split
             num_workers: How many workers to use for loading data
             normalize: If true applies image normalize
             batch_size: How many samples per batch to load
             seed: Random seed to be used for train/val/test splits
             shuffle: If true shuffles the train data every epoch
-            pin_memory: If true, the data loader will copy Tensors into CUDA pinned memory before
-                        returning them
+            pin_memory: If true, the data loader will copy Tensors
+                        into CUDA pinned memory before returning them
             drop_last: If true drops the last incomplete batch
             train_transforms: transformations you can apply to train dataset
             val_transforms: transformations you can apply to validation dataset
@@ -67,7 +68,10 @@ class VisionDataModule(LightningDataModule):
 
     @property
     def train_transforms(self) -> Optional[Callable[..., Any]]:
-        """Optional transforms (or collection of transforms) you can apply to train dataset."""
+        """
+        Optional transforms (or collection of transforms)
+        you can apply to train dataset.
+        """
         return self._train_transforms
 
     @train_transforms.setter
@@ -76,7 +80,10 @@ class VisionDataModule(LightningDataModule):
 
     @property
     def val_transforms(self) -> Optional[Callable[..., Any]]:
-        """Optional transforms (or collection of transforms) you can apply to validation dataset."""
+        """
+        Optional transforms (or collection of transforms)
+        you can apply to validation dataset.
+        """
         return self._val_transforms
 
     @val_transforms.setter
@@ -85,7 +92,10 @@ class VisionDataModule(LightningDataModule):
 
     @property
     def test_transforms(self) -> Optional[Callable[..., Any]]:
-        """Optional transforms (or collection of transforms) you can apply to test dataset."""
+        """
+        Optional transforms (or collection of transforms)
+        you can apply to test dataset.
+        """
         return self._test_transforms
 
     @test_transforms.setter
@@ -100,27 +110,37 @@ class VisionDataModule(LightningDataModule):
     def setup(self, stage: Optional[str] = None) -> None:
         """Creates train, val, and test dataset."""
         if stage == "fit" or stage is None:
-            train_transforms = self.default_transforms() if self.train_transforms is None else self.train_transforms
-            val_transforms = self.default_transforms() if self.val_transforms is None else self.val_transforms
+            train_transforms = self.default_transforms() \
+                if self.train_transforms is None else self.train_transforms
+            val_transforms = self.default_transforms() \
+                if self.val_transforms is None else self.val_transforms
 
-            dataset_train = self.dataset_cls(self.data_dir, train=True, transform=train_transforms, **self.EXTRA_ARGS)
-            dataset_val = self.dataset_cls(self.data_dir, train=True, transform=val_transforms, **self.EXTRA_ARGS)
+            dataset_train = self.dataset_cls(self.data_dir, train=True,
+                                             transform=train_transforms,
+                                             **self.EXTRA_ARGS)
+            dataset_val = self.dataset_cls(self.data_dir, train=True,
+                                           transform=val_transforms,
+                                           **self.EXTRA_ARGS)
 
             # Split
             self.dataset_train = self._split_dataset(dataset_train)
             self.dataset_val = self._split_dataset(dataset_val, train=False)
 
         if stage == "test" or stage is None:
-            test_transforms = self.default_transforms() if self.test_transforms is None else self.test_transforms
-            self.dataset_test = self.dataset_cls(
-                self.data_dir, train=False, transform=test_transforms, **self.EXTRA_ARGS
-            )
+            test_transforms = self.default_transforms() \
+                if self.test_transforms is None else self.test_transforms
+            self.dataset_test = self.dataset_cls(self.data_dir, train=False,
+                                                 transform=test_transforms,
+                                                 **self.EXTRA_ARGS)
 
     def _split_dataset(self, dataset: Dataset, train: bool = True) -> Dataset:
         """Splits the dataset into train and validation set."""
         len_dataset = len(dataset)
         splits = self._get_splits(len_dataset)
-        dataset_train, dataset_val = random_split(dataset, splits, generator=torch.Generator().manual_seed(self.seed))
+        dataset_train, dataset_val = random_split(
+            dataset, splits,
+            generator=torch.Generator().manual_seed(self.seed)
+        )
 
         if train:
             return dataset_train
@@ -148,11 +168,19 @@ class VisionDataModule(LightningDataModule):
         """The train dataloader."""
         return self._data_loader(self.dataset_train, shuffle=self.shuffle)
 
-    def val_dataloader(self, *args: Any, **kwargs: Any) -> Union[DataLoader, List[DataLoader]]:
+    def val_dataloader(
+            self,
+            *args: Any,
+            **kwargs: Any
+    ) -> Union[DataLoader, List[DataLoader]]:
         """The val dataloader."""
         return self._data_loader(self.dataset_val)
 
-    def test_dataloader(self, *args: Any, **kwargs: Any) -> Union[DataLoader, List[DataLoader]]:
+    def test_dataloader(
+            self,
+            *args: Any,
+            **kwargs: Any
+    ) -> Union[DataLoader, List[DataLoader]]:
         """The test dataloader."""
         return self._data_loader(self.dataset_test)
 
@@ -229,14 +257,15 @@ class CIFAR10DataModule(VisionDataModule):
         """
         Args:
             data_dir: Where to save/load the data
-            val_split: Percent (float) or number (int) of samples to use for the validation split
+            val_split: Percent (float) or number (int) of samples
+                       to use for the validation split
             num_workers: How many workers to use for loading data
             normalize: If true applies image normalize
             batch_size: How many samples per batch to load
             seed: Random seed to be used for train/val/test splits
             shuffle: If true shuffles the train data every epoch
-            pin_memory: If true, the data loader will copy Tensors into CUDA pinned memory before
-                        returning them
+            pin_memory: If true, the data loader will copy Tensors
+                        into CUDA pinned memory before returning them
             drop_last: If true drops the last incomplete batch
         """
         super().__init__(  # type: ignore[misc]
