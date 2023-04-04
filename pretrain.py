@@ -42,7 +42,7 @@ class CIFARResNet(pl.LightningModule):
         encoder.conv1 = nn.Conv2d(3, 64, kernel_size=3, padding=1, bias=False)
         encoder.maxpool = nn.Identity()
         self.encoder = encoder
-        self.classifiers = nn.ModuleList(copy.deepcopy(encoder.fc))
+        self.classifiers = nn.ModuleList([copy.deepcopy(encoder.fc)])
         self.encoder.fc = nn.Identity()
 
         self.loss = nn.CrossEntropyLoss()
