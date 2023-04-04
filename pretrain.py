@@ -123,13 +123,14 @@ class CIFARResNet(pl.LightningModule):
         parser.add_argument("--fast_dev_run", default=False, type=int)
         parser.add_argument("--fp16", default=False, action="store_true")
         parser.add_argument("--data_dir", default="data", type=str)
-        parser.add_argument("--batch_size", default=512, type=int)
+        parser.add_argument("--val_split", default=0.2, type=float)
+        parser.add_argument("--batch_size", default=192, type=int)
         parser.add_argument("--num_workers", default=2, type=int)
-        parser.add_argument("--max_epochs", default=100, type=int)
+        parser.add_argument("--max_epochs", default=200, type=int)
         parser.add_argument("--max_steps", default=-1, type=int)
-        parser.add_argument("--learning_rate", default=1e-3, type=float)
-        parser.add_argument("--weight_decay", default=1e-2, type=float)
-        parser.add_argument("--warmup_epochs", default=10, type=int)
+        parser.add_argument("--learning_rate", default=5e-3, type=float)
+        parser.add_argument("--weight_decay", default=3e-2, type=float)
+        parser.add_argument("--warmup_epochs", default=20, type=int)
 
         return parser
 
@@ -144,8 +145,12 @@ if __name__ == '__main__':
     parser = CIFARResNet.add_model_specific_args(parser)
     args = parser.parse_args()
 
-    dm = CIFAR10DataModule(data_dir=args.data_dir, batch_size=args.batch_size,
-                           num_workers=args.num_workers)
+    dm = CIFAR10DataModule(
+        data_dir=args.data_dir,
+        val_split=args.val_split,
+        batch_size=args.batch_size,
+        num_workers=args.num_workers
+    )
     args.num_samples = dm.num_samples
     args.num_classes = dm.num_classes
 
@@ -176,17 +181,20 @@ if __name__ == '__main__':
     ])
 
     model = CIFARResNet(**args.__dict__)
-    tensorboard_logger = TensorBoardLogger(
+
+    logger = [TensorBoardLogger(
         save_dir="lightning_logs",
         name="pretrain",
         version=args.version
-    )
-    wandb_logger = WandbLogger(
-        save_dir="lightning_logs",
-        name="pretrain",
-        version=args.version,
-        project="continual-learning",
-    )
+    )]
+    if not args.fast_dev_run:
+        wandb_logger = WandbLogger(
+            save_dir="lightning_logs",
+            name="pretrain",
+            version=args.version,
+            project="continual-learning",
+        )
+        logger.append(wandb_logger)
     lr_monitor = LearningRateMonitor(logging_interval="step")
     model_checkpoint = ModelCheckpoint(monitor="loss/val",
                                        save_last=True, save_top_k=5)
@@ -195,14 +203,15 @@ if __name__ == '__main__':
     trainer = Trainer(
         max_epochs=args.max_epochs,
         max_steps=args.max_steps,
+        limit_val_batches=1. if args.val_split > 0. else 0.,
         devices=args.devices if args.devices > 0 else None,
         num_nodes=args.num_nodes,
-        accelerator="gpu" if args.devices > 0 else None,
+        accelerator="auto" if not args.fast_dev_run else "cpu",
         strategy="ddp_find_unused_parameters_false",
         sync_batchnorm=True if args.devices > 1 else False,
         precision=16 if args.fp16 else 32,
         callbacks=callbacks,
-        logger=[tensorboard_logger, wandb_logger],
+        logger=logger,
         fast_dev_run=args.fast_dev_run,
     )
 
