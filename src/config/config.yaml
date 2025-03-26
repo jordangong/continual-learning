@@ -1,0 +1,67 @@
+defaults:
+  - dataset: cifar100
+  - model: vit_base_patch16_224.orig_in21k
+  - optimizer: adam
+  - scheduler: cosine
+  - _self_
+
+# General settings
+seed: 42
+device: cuda
+num_workers: 4
+
+# Distributed training settings
+distributed:
+  enabled: false  # Set to true to enable distributed training
+  world_size: ${oc.env:WORLD_SIZE,${oc.decode:${oc.env:CUDA_VISIBLE_DEVICES,0}:length}}  # Number of GPUs to use
+
+# Debug settings
+debug:
+  enabled: false  # Set to true to enable debug mode
+  verbose: true   # Enable verbose logging
+  fast_dev_run: false  # Run only a few batches for quick testing
+  limit_train_batches: 1.0  # Fraction of training batches to use (1.0 = all)
+  limit_val_batches: 1.0    # Fraction of validation batches to use (1.0 = all)
+  log_every_n_steps: 1      # Log metrics every N steps
+
+# Continual learning settings
+continual:
+  num_steps: 10  # Number of continual learning steps
+  classes_per_step: 10  # Number of classes per step
+  memory_size: 2000  # Size of memory buffer for rehearsal (if used)
+  strategy: "finetune"  # Options: finetune, ewc, replay, etc.
+
+# Training settings
+training:
+  num_epochs: 100
+  batch_size: 64
+  eval_every: 1  # Evaluate every N epochs
+  save_every: 10  # Save checkpoint every N epochs
+  early_stopping_patience: 10
+
+# Logging settings
+logging:
+  tensorboard: true
+  wandb: true
+  wandb_project: "continual-learning"
+  wandb_entity: null  # Set to your wandb username or team name
+  wandb_dir: "${hydra:runtime.cwd}/outputs/wandb"  # Store wandb files in outputs directory
+  log_dir: "${hydra:runtime.cwd}/outputs/logs/${dataset.name}_${model.name}_${continual.strategy}_${now:%Y-%m-%d_%H-%M-%S}"
+
+# Paths
+paths:
+  data_dir: "${hydra:runtime.cwd}/data"  # Data directory is kept outside outputs as it's input, not output
+  checkpoint_dir: "${hydra:runtime.cwd}/outputs/checkpoints"
+  cache_dir: "${hydra:runtime.cwd}/cache"  # Cache directory for model weights
+  output_root: "${hydra:runtime.cwd}/outputs"  # Root directory for all outputs
+
+# Hydra configuration
+hydra:
+  run:
+    dir: ${paths.output_root}/runs/${dataset.name}_${model.name}_${continual.strategy}_${now:%Y-%m-%d_%H-%M-%S}
+  sweep:
+    dir: ${paths.output_root}/multirun/${dataset.name}_${model.name}_${continual.strategy}_${now:%Y-%m-%d_%H-%M-%S}
+  job_logging:
+    handlers:
+      file:
+        filename: ${hydra.run.dir}/hydra.log

@@ -1,0 +1,31 @@
+name: vtab
+input_size: 224  # Resize to match pretrained model input size
+mean: [0.485, 0.456, 0.406]  # ImageNet mean
+std: [0.229, 0.224, 0.225]   # ImageNet std
+num_classes: 100  # Default to CIFAR100 task (100 classes)
+task: cifar100  # Default VTAB task
+# Available tasks:
+# - cifar100 (100 classes)
+# - caltech101 (102 classes)
+# - dtd (47 classes)
+# - oxford_flowers102 (102 classes)
+# - oxford_iiit_pet (37 classes)
+# - sun397 (397 classes)
+# - svhn (10 classes)
+# - patch_camelyon (2 classes)
+# - eurosat (10 classes)
+# - resisc45 (45 classes)
+# - diabetic_retinopathy (5 classes)
+# - clevr_count (8 classes)
+# - clevr_distance (6 classes)
+# - dmlab (6 classes)
+# - kitti (4 classes)
+# - smallnorb_azimuth (18 classes)
+# - smallnorb_elevation (9 classes)
+# - dsprites_orientation (16 classes)
+# - dsprites_location (16 classes)
+augmentation:
+  random_crop: true
+  random_horizontal_flip: true
+  color_jitter: true
+  auto_augment: false

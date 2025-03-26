@@ -1,0 +1,10 @@
+name: cifar100
+input_size: 224  # Resize to match pretrained model input size
+mean: [0.5071, 0.4867, 0.4408]
+std: [0.2675, 0.2565, 0.2761]
+num_classes: 100
+augmentation:
+  random_crop: true
+  random_horizontal_flip: true
+  color_jitter: false
+  auto_augment: false

@@ -1,0 +1,4 @@
+name: cosine
+warmup_epochs: 5
+warmup_start_lr: 0.00001
+min_lr: 0.000001

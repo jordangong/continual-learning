@@ -1,0 +1,35 @@
+name: omnibench
+input_size: 224  # Resize to match pretrained model input size
+mean: [0.485, 0.456, 0.406]  # ImageNet mean
+std: [0.229, 0.224, 0.225]   # ImageNet std
+# The number of classes is determined automatically based on the category
+category: all  # Default category to use
+max_classes: 300   # Maximum number of classes to use when category is 'all'
+# Available categories in OmniBenchmark v2:
+# - all           # Special category that aggregates all categories below (limited by max_classes)
+# - activity
+# - aircraft
+# - amphibian
+# - aquatic_vertebrate
+# - bird
+# - car
+# - consumer_goods
+# - creation
+# - decoration
+# - device
+# - food
+# - geological_formation
+# - instrumentality
+# - locomotive
+# - mammal
+# - material
+# - military_vehicle
+# - structure
+# - vascular_plant
+# - vehicle
+# - watercraft
+augmentation:
+  random_crop: true
+  random_horizontal_flip: true
+  color_jitter: true
+  auto_augment: false

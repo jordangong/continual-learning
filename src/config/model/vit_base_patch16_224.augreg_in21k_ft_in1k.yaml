@@ -1,0 +1,9 @@
+name: vit_base_patch16_224.augreg_in21k_ft_in1k
+source: timm  # Options: timm, openclip
+pretrained: true
+freeze_backbone: false  # Whether to freeze the backbone during training
+feature_dim: 768  # Feature dimension for ViT base
+classifier:
+  type: linear  # Options: linear, mlp
+  hidden_dim: 512  # Only used if type is mlp
+  dropout: 0.1
