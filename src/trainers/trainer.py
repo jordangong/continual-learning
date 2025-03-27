@@ -475,6 +475,13 @@ class ContinualTrainer:
                 if patience_counter >= self.training_config["early_stopping_patience"]:
                     print(f"Early stopping at epoch {epoch + 1}")
                     break
+            else:  # Log training metrics
+                self._log_metrics(
+                    step=step,
+                    epoch=epoch,
+                    train_loss=train_loss,
+                    train_acc=train_acc,
+                )
 
             # Step scheduler
             if self.scheduler is not None:
@@ -740,8 +747,8 @@ class ContinualTrainer:
         epoch: int,
         train_loss: float,
         train_acc: float,
-        test_loss: float,
-        test_acc: float,
+        test_loss: Optional[float] = None,
+        test_acc: Optional[float] = None,
     ):
         """Log metrics to TensorBoard and Weights & Biases."""
         # Only log on the main process if distributed
@@ -759,18 +766,18 @@ class ContinualTrainer:
 
         # Print metrics
         debug_prefix = "[DEBUG] " if debug_enabled else ""
-        print(
-            f"{debug_prefix}Epoch {epoch + 1}: "
-            f"Train Loss: {train_loss:.4f}, Train Acc: {train_acc:.2f}%, "
-            f"Test Loss: {test_loss:.4f}, Test Acc: {test_acc:.2f}%"
-        )
+        train_metrics = f"Train Loss: {train_loss:.4f}, Train Acc: {train_acc:.2f}%"
+        if test_loss is not None and test_acc is not None:
+            train_metrics += f", Test Loss: {test_loss:.4f}, Test Acc: {test_acc:.2f}%"
+        print(f"{debug_prefix}Epoch {epoch + 1}: {train_metrics}")
 
         # Log to TensorBoard
         if self.writer is not None:
             self.writer.add_scalar(f"step_{step}/train_loss", train_loss, epoch)
             self.writer.add_scalar(f"step_{step}/train_acc", train_acc, epoch)
-            self.writer.add_scalar(f"step_{step}/test_loss", test_loss, epoch)
-            self.writer.add_scalar(f"step_{step}/test_acc", test_acc, epoch)
+            if test_loss is not None and test_acc is not None:
+                self.writer.add_scalar(f"step_{step}/test_loss", test_loss, epoch)
+                self.writer.add_scalar(f"step_{step}/test_acc", test_acc, epoch)
 
             # Log learning rate
             lr = self.optimizer.param_groups[0]["lr"]
@@ -780,17 +787,20 @@ class ContinualTrainer:
 
         # Log to Weights & Biases
         if self.logging_config["wandb"]:
-            wandb.log(
-                {
-                    f"step_{step}/train_loss": train_loss,
-                    f"step_{step}/train_acc": train_acc,
+            log_data = {
+                f"step_{step}/train_loss": train_loss,
+                f"step_{step}/train_acc": train_acc,
+                "learning_rate": self.optimizer.param_groups[0]["lr"],
+                "step": step,
+                "epoch": epoch,
+            }
+            if test_loss is not None and test_acc is not None:
+                log_data.update({
                     f"step_{step}/test_loss": test_loss,
                     f"step_{step}/test_acc": test_acc,
-                    "learning_rate": self.optimizer.param_groups[0]["lr"],
-                    "step": step,
-                    "epoch": epoch,
-                }
-            )
+                })
+
+            wandb.log(log_data)
 
     def _save_checkpoint(self, step: int, epoch: int, best: bool = False):
         """
