@@ -145,8 +145,12 @@ def run_training(rank: Optional[int], world_size: Optional[int], cfg: DictConfig
     
     # Only create plots and log final metrics on main process if distributed
     if not distributed or (distributed and rank == 0):
-        # Create plots directory
-        plots_dir = os.path.join(config["paths"]["output_root"], "plots")
+        # Extract the experiment name from the log directory to keep the same timestamp
+        log_dir = config["logging"]["log_dir"]
+        experiment_name = os.path.basename(log_dir)
+        
+        # Create experiment-specific plots directory with the same name as the log directory
+        plots_dir = os.path.join(config["paths"]["output_root"], "plots", experiment_name)
         os.makedirs(plots_dir, exist_ok=True)
         
         # Plot and save accuracy curve
