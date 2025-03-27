@@ -1,5 +1,5 @@
 # Data
-data/
+/data/
 
 # Outputs (includes logs, checkpoints, wandb, and hydra runs)
 outputs/

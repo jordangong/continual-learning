@@ -31,4 +31,4 @@ echo "Running distributed training with $NUM_GPUS GPUs"
 echo "Using config: $CONFIG"
 
 # Run the training script with distributed flag
-python -m src.main distributed.enabled=true distributed.world_size=$NUM_GPUS hydra.config_name=$CONFIG
+python -m src.main distributed.enabled=true distributed.world_size="$NUM_GPUS" hydra.config_name="$CONFIG"

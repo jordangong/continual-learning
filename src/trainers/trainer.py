@@ -74,9 +74,9 @@ class ContinualTrainer:
                     # We'll try to create a small tensor and convert it to BF16
                     # If it works, we'll assume BF16 is supported
                     try:
-                        test_tensor = torch.zeros(1, device="cpu").to(torch.bfloat16)
+                        _ = torch.zeros(1, device="cpu").to(torch.bfloat16)
                         self.mixed_precision_dtype = torch.bfloat16
-                        print(f"Using bfloat16 mixed precision training on CPU")
+                        print("Using bfloat16 mixed precision training on CPU")
                     except Exception as e:
                         print(
                             f"Warning: bfloat16 not supported on this CPU. Disabling mixed precision. Error: {e}"
@@ -93,24 +93,24 @@ class ContinualTrainer:
                     # Use bfloat16 if supported, otherwise fall back to float16
                     if torch.cuda.is_available() and torch.cuda.is_bf16_supported():
                         self.mixed_precision_dtype = torch.bfloat16
-                        print(f"Using bfloat16 mixed precision training on CUDA")
+                        print("Using bfloat16 mixed precision training on CUDA")
                     else:
                         self.mixed_precision_dtype = torch.float16
                         print(
-                            f"bfloat16 not supported on this GPU, falling back to float16 mixed precision training"
+                            "bfloat16 not supported on this GPU, falling back to float16 mixed precision training"
                         )
                 elif mixed_precision_dtype == "bfloat16":
                     if torch.cuda.is_available() and torch.cuda.is_bf16_supported():
                         self.mixed_precision_dtype = torch.bfloat16
-                        print(f"Using bfloat16 mixed precision training on CUDA")
+                        print("Using bfloat16 mixed precision training on CUDA")
                     else:
                         print(
-                            f"Warning: bfloat16 requested but not supported by GPU. Disabling mixed precision."
+                            "Warning: bfloat16 requested but not supported by GPU. Disabling mixed precision."
                         )
                         self.mixed_precision_enabled = False
                 elif mixed_precision_dtype == "float16":
                     self.mixed_precision_dtype = torch.float16
-                    print(f"Using float16 mixed precision training on CUDA")
+                    print("Using float16 mixed precision training on CUDA")
                 else:
                     print(
                         f"Warning: Unknown mixed precision dtype '{mixed_precision_dtype}'. Disabling mixed precision."
@@ -456,7 +456,7 @@ class ContinualTrainer:
         # Set description based on debug mode
         debug_enabled = self.debug_config.get("enabled", False)
         debug_verbose = debug_enabled and self.debug_config.get("verbose", False)
-        desc = f"Training [DEBUG]" if debug_enabled else "Training"
+        desc = "Training [DEBUG]" if debug_enabled else "Training"
 
         train_iter = tqdm(train_loader, desc=desc) if should_show_pbar else train_loader
 
@@ -594,7 +594,7 @@ class ContinualTrainer:
 
         # Set description based on debug mode
         debug_enabled = self.debug_config.get("enabled", False)
-        desc = f"Evaluating [DEBUG]" if debug_enabled else "Evaluating"
+        desc = "Evaluating [DEBUG]" if debug_enabled else "Evaluating"
 
         with torch.no_grad():
             test_iter = (
