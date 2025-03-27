@@ -20,8 +20,8 @@
 # Enable aliases
 shopt -s expand_aliases
 
-# Print job info if running on SLURM
-if [ -n "$SLURM_JOB_ID" ] || [ -n "$SLURM_JOBID" ] || [ -n "$SLURM_CLUSTER_NAME" ]; then
+# Print job info if running on SLURM via sbatch (not srun)
+if [[ -n "$SLURM_JOB_ID" && -z "$SLURM_STEP_ID" ]]; then
   alias python="srun python"
   # print info about current job
   scontrol show job "$SLURM_JOB_ID"
