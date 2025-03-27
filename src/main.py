@@ -78,7 +78,10 @@ def run_training(rank: Optional[int], world_size: Optional[int], cfg: DictConfig
     
     # Setup logger (only on main process if distributed)
     if not distributed or (distributed and rank == 0):
-        logger = setup_logger(config["logging"]["log_dir"])
+        # Create experiment-specific log directory
+        experiment_name = config["experiment"]["name"]
+        log_dir = os.path.join(config["paths"]["log_dir"], experiment_name)
+        logger = setup_logger(log_dir)
         logger.info(f"Configuration: {OmegaConf.to_yaml(cfg)}")
     else:
         logger = None
@@ -145,12 +148,11 @@ def run_training(rank: Optional[int], world_size: Optional[int], cfg: DictConfig
     
     # Only create plots and log final metrics on main process if distributed
     if not distributed or (distributed and rank == 0):
-        # Extract the experiment name from the log directory to keep the same timestamp
-        log_dir = config["logging"]["log_dir"]
-        experiment_name = os.path.basename(log_dir)
+        # Use the experiment name from the config
+        experiment_name = config["experiment"]["name"]
         
-        # Create experiment-specific plots directory with the same name as the log directory
-        plots_dir = os.path.join(config["paths"]["output_root"], "plots", experiment_name)
+        # Create experiment-specific plots directory
+        plots_dir = os.path.join(config["paths"]["plots_dir"], experiment_name)
         os.makedirs(plots_dir, exist_ok=True)
         
         # Plot and save accuracy curve

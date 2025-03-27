@@ -1,3 +1,6 @@
+# ======================================================
+# HYDRA CONFIGURATION
+# ======================================================
 defaults:
   - dataset: cifar100
   - model: vit_base_patch16_224.orig_in21k
@@ -5,62 +8,86 @@ defaults:
   - scheduler: cosine
   - _self_
 
-# General settings
+# ======================================================
+# EXPERIMENT SETTINGS
+# ======================================================
+# Experiment identification and naming
+experiment:
+  name: "${dataset.name}_${model.name}_${continual.strategy}_${now:%Y-%m-%d_%H-%M-%S}"
+
+# ======================================================
+# SYSTEM SETTINGS
+# ======================================================
+# Basic system configuration
 seed: 42
 device: cuda
 num_workers: 4
 
-# Distributed training settings
+# Distributed training configuration
 distributed:
   enabled: false  # Set to true to enable distributed training
   world_size: ${oc.env:WORLD_SIZE,${oc.decode:${oc.env:CUDA_VISIBLE_DEVICES,0}:length}}  # Number of GPUs to use
 
-# Debug settings
-debug:
-  enabled: false  # Set to true to enable debug mode
-  verbose: true   # Enable verbose logging
-  fast_dev_run: false  # Run only a few batches for quick testing
-  limit_train_batches: 1.0  # Fraction of training batches to use (1.0 = all)
-  limit_val_batches: 1.0    # Fraction of validation batches to use (1.0 = all)
-  log_every_n_steps: 1      # Log metrics every N steps
-
-# Continual learning settings
+# ======================================================
+# TRAINING CONFIGURATION
+# ======================================================
+# Continual learning parameters
 continual:
-  num_steps: 10  # Number of continual learning steps
-  classes_per_step: 10  # Number of classes per step
-  memory_size: 2000  # Size of memory buffer for rehearsal (if used)
-  strategy: "finetune"  # Options: finetune, ewc, replay, etc.
+  num_steps: 10                # Number of continual learning steps
+  classes_per_step: 10         # Number of classes per step
+  memory_size: 2000            # Size of memory buffer for rehearsal (if used)
+  strategy: "finetune"         # Options: finetune, ewc, replay, etc.
 
-# Training settings
+# Training hyperparameters
 training:
-  num_epochs: 100
-  batch_size: 64
-  eval_every: 1  # Evaluate every N epochs
-  save_every: 10  # Save checkpoint every N epochs
-  early_stopping_patience: 10
+  num_epochs: 100              # Maximum epochs per step
+  batch_size: 64               # Batch size for training
+  eval_every: 1                # Evaluate every N epochs
+  save_every: 10               # Save checkpoint every N epochs
+  early_stopping_patience: 10  # Patience for early stopping
 
-# Logging settings
+# ======================================================
+# OUTPUT AND LOGGING
+# ======================================================
+# Logging configuration
 logging:
-  tensorboard: true
-  wandb: true
+  tensorboard: true            # Enable TensorBoard logging
+  wandb: true                  # Enable Weights & Biases logging
   wandb_project: "continual-learning"
-  wandb_entity: null  # Set to your wandb username or team name
-  wandb_dir: "${hydra:runtime.cwd}/outputs/wandb"  # Store wandb files in outputs directory
-  log_dir: "${hydra:runtime.cwd}/outputs/logs/${dataset.name}_${model.name}_${continual.strategy}_${now:%Y-%m-%d_%H-%M-%S}"
+  wandb_entity: null           # Set to your wandb username or team name
 
-# Paths
+# Path configuration
 paths:
-  data_dir: "${hydra:runtime.cwd}/data"  # Data directory is kept outside outputs as it's input, not output
-  checkpoint_dir: "${hydra:runtime.cwd}/outputs/checkpoints"
-  cache_dir: "${hydra:runtime.cwd}/cache"  # Cache directory for model weights
-  output_root: "${hydra:runtime.cwd}/outputs"  # Root directory for all outputs
+  # Input paths
+  data_dir: "${hydra:runtime.cwd}/data"            # Data directory
+  cache_dir: "${hydra:runtime.cwd}/cache"          # Cache directory for model weights
+  
+  # Output paths
+  output_root: "${hydra:runtime.cwd}/outputs"      # Root directory for all outputs
+  log_dir: "${paths.output_root}/logs"     # Directory for log files
+  plots_dir: "${paths.output_root}/plots"  # Directory for plot files
+  checkpoint_dir: "${paths.output_root}/checkpoints"  # Directory for model checkpoints
+  wandb_dir: "${paths.output_root}/wandb"  # Store wandb files in outputs directory
 
-# Hydra configuration
+# ======================================================
+# DEBUGGING TOOLS
+# ======================================================
+debug:
+  enabled: false               # Set to true to enable debug mode
+  verbose: true                # Enable verbose logging
+  fast_dev_run: false          # Run only a few batches for quick testing
+  limit_train_batches: 1.0     # Fraction of training batches to use (1.0 = all)
+  limit_val_batches: 1.0       # Fraction of validation batches to use (1.0 = all)
+  log_every_n_steps: 1         # Log metrics every N steps
+
+# ======================================================
+# HYDRA RUNTIME SETTINGS
+# ======================================================
 hydra:
   run:
-    dir: ${paths.output_root}/runs/${dataset.name}_${model.name}_${continual.strategy}_${now:%Y-%m-%d_%H-%M-%S}
+    dir: ${paths.output_root}/runs/${experiment.name}
   sweep:
-    dir: ${paths.output_root}/multirun/${dataset.name}_${model.name}_${continual.strategy}_${now:%Y-%m-%d_%H-%M-%S}
+    dir: ${paths.output_root}/multirun/${experiment.name}
   job_logging:
     handlers:
       file:

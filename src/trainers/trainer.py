@@ -143,7 +143,9 @@ class ContinualTrainer:
     
     def setup_logging(self):
         """Setup logging based on configuration."""
-        self.log_dir = self.logging_config["log_dir"]
+        # Create experiment-specific log directory
+        experiment_name = self.config["experiment"]["name"]
+        self.log_dir = os.path.join(self.config["paths"]["log_dir"], experiment_name)
         os.makedirs(self.log_dir, exist_ok=True)
         
         # Only setup logging on the main process if distributed
@@ -157,17 +159,17 @@ class ContinualTrainer:
             # Setup Weights & Biases
             if self.logging_config["wandb"]:
                 # Create wandb directory if it doesn't exist
-                wandb_dir = self.logging_config.get("wandb_dir", None)
+                wandb_dir = self.config["paths"]["wandb_dir"]
                 if wandb_dir:
                     os.makedirs(wandb_dir, exist_ok=True)
                 
-                # Initialize wandb with more descriptive run name
+                # Initialize wandb with experiment name from config
                 wandb.init(
                     project=self.logging_config["wandb_project"],
                     entity=self.logging_config["wandb_entity"],
                     config=self.config,
                     dir=wandb_dir,
-                    name=os.path.basename(self.log_dir)
+                    name=self.config["experiment"]["name"]
                 )
         else:
             self.writer = None
