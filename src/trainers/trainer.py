@@ -634,7 +634,6 @@ class ContinualTrainer:
                 postfix = {
                     "loss": total_loss / (train_iter.n + 1),
                     "acc": 100.0 * correct / total,
-                    "epoch": epoch + 1,
                 }
 
                 # Add more detailed info in verbose debug mode
@@ -645,6 +644,7 @@ class ContinualTrainer:
                             "batch_size": batch_size,
                             "lr": self.optimizer.param_groups[0]["lr"],
                             "step": step,
+                            "epoch": epoch + 1,
                         }
                     )
 

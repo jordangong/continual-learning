@@ -1,5 +1,6 @@
 import os
 import random
+import time
 from typing import Optional
 
 import hydra
@@ -126,7 +127,13 @@ def run_training(
         )
 
         # Train on current step
+        start_time = time.time()
         metrics = trainer.train_step(step, train_loader, test_loader)
+        train_time = time.time() - start_time
+        if not distributed or (distributed and rank == 0):
+            print(
+                f"Step {step + 1}/{num_steps} training time: {train_time:.2f} seconds"
+            )
 
         # Record metrics
         accuracies.append(metrics["accuracy"])
