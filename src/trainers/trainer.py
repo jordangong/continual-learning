@@ -194,34 +194,68 @@ class ContinualTrainer:
 
     def _setup_scheduler(self) -> Optional[torch.optim.lr_scheduler._LRScheduler]:
         """Setup scheduler based on configuration.
-        
+
         Returns:
             Configured learning rate scheduler
         """
         scheduler_config = self.config["scheduler"]
         scheduler_name = scheduler_config["name"].lower()
         use_global_scheduler = scheduler_config.get("global_scheduler", False)
-        
+
         if scheduler_name == "cosine":
+            # Check if warmup is enabled
+            warmup_epochs = scheduler_config.get("warmup_epochs", 0)
+            warmup_start_lr = scheduler_config.get("warmup_start_lr", 0.00001)
+            min_lr = scheduler_config.get("min_lr", 0)
+
             # Calculate T_max based on whether we're using a global scheduler
             if use_global_scheduler:
                 # For global scheduler: total epochs across all steps
                 total_steps = self.continual_config["num_steps"]
                 epochs_per_step = self.training_config["num_epochs"]
                 total_epochs = total_steps * epochs_per_step
-                
-                return optim.lr_scheduler.CosineAnnealingLR(
+
+                # Create base cosine scheduler
+                cosine_scheduler = optim.lr_scheduler.CosineAnnealingLR(
                     self.optimizer,
-                    T_max=total_epochs,
-                    eta_min=scheduler_config.get("min_lr", 0),
+                    T_max=total_epochs
+                    - warmup_epochs,  # Adjust T_max to account for warmup
+                    eta_min=min_lr,
                 )
             else:
                 # For per-step scheduler: just the epochs for this step
-                return optim.lr_scheduler.CosineAnnealingLR(
+                total_epochs = self.training_config["num_epochs"]
+
+                # Create base cosine scheduler
+                cosine_scheduler = optim.lr_scheduler.CosineAnnealingLR(
                     self.optimizer,
-                    T_max=self.training_config["num_epochs"],
-                    eta_min=scheduler_config.get("min_lr", 0),
+                    T_max=total_epochs
+                    - warmup_epochs,  # Adjust T_max to account for warmup
+                    eta_min=min_lr,
                 )
+
+            # If warmup is enabled, use a sequential scheduler
+            if warmup_epochs > 0:
+                # Get initial learning rate from optimizer
+                initial_lr = self.optimizer.param_groups[0]["lr"]
+
+                # Create linear warmup scheduler
+                warmup_scheduler = optim.lr_scheduler.LinearLR(
+                    self.optimizer,
+                    start_factor=warmup_start_lr / initial_lr,
+                    end_factor=1.0,
+                    total_iters=warmup_epochs,
+                )
+
+                # Combine warmup and cosine schedulers
+                return optim.lr_scheduler.SequentialLR(
+                    self.optimizer,
+                    schedulers=[warmup_scheduler, cosine_scheduler],
+                    milestones=[warmup_epochs],
+                )
+            else:
+                # If no warmup, just return the cosine scheduler
+                return cosine_scheduler
         elif scheduler_name == "step":
             return optim.lr_scheduler.StepLR(
                 self.optimizer,
@@ -381,21 +415,23 @@ class ContinualTrainer:
                 num_epochs = self.training_config["num_epochs"]
         else:
             num_epochs = self.training_config["num_epochs"]
-            
+
         # Get scheduler configuration
         scheduler_config = self.config["scheduler"]
         use_global_scheduler = scheduler_config.get("global_scheduler", False)
-        
+
         # For per-step scheduler, reset both optimizer and scheduler
         if not use_global_scheduler:
             # Reset optimizer for this step
             self.optimizer = self._setup_optimizer()
-            
+
             # Setup a fresh scheduler for this continual learning step
             self.scheduler = self._setup_scheduler()
-            
+
             if not self.distributed or (self.distributed and self.local_rank == 0):
-                print(f"Initialized new optimizer and scheduler for step {step+1}/{self.continual_config['num_steps']}")
+                print(
+                    f"Initialized new optimizer and scheduler for step {step + 1}/{self.continual_config['num_steps']}"
+                )
         else:
             # For global scheduler, only initialize once or update with current step
             if self.scheduler is None:
