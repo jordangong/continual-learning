@@ -21,6 +21,14 @@ def setup_logger(log_dir: str, name: str = "continual_learning") -> logging.Logg
     
     # Create logger
     logger = logging.getLogger(name)
+    
+    # Clear any existing handlers to avoid duplication
+    if logger.hasHandlers():
+        logger.handlers.clear()
+    
+    # Prevent propagation to the root logger to avoid duplicate logs
+    logger.propagate = False
+    
     logger.setLevel(logging.INFO)
     
     # Create formatter

@@ -313,14 +313,13 @@ class ContinualTrainer:
         # Final evaluation
         _, final_acc = self._evaluate(test_loader)
         
-        # Update metrics
+        # Update accuracy metrics first
+        self.metrics["accuracy"].append(final_acc)
+        
+        # Then calculate forgetting using updated metrics
         if step > 0:
             fgt = forgetting(self.metrics["accuracy"], step)
             self.metrics["forgetting"].append(fgt)
-            debug_prefix = "[DEBUG] " if self.debug_config.get("enabled", False) else ""
-            print(f"{debug_prefix}Forgetting: {fgt:.4f}")
-        
-        self.metrics["accuracy"].append(final_acc)
         
         # Store EWC data if needed
         if self.continual_config["strategy"] == "ewc" and step < self.continual_config["num_steps"] - 1:
@@ -575,7 +574,8 @@ class ContinualTrainer:
             checkpoint_path = os.path.join(self.checkpoint_dir, 
                 f"{dataset_name}_{model_name}_{strategy}_step{step}_epoch{epoch}.pth")
         
-        torch.save(checkpoint, checkpoint_path)
+        # Save checkpoint with _use_new_zipfile_serialization=True for better compatibility
+        torch.save(checkpoint, checkpoint_path, _use_new_zipfile_serialization=True)
     
     def _load_checkpoint(self, step: int, best: bool = True):
         """
@@ -602,7 +602,8 @@ class ContinualTrainer:
             return
         
         # Load checkpoint
-        checkpoint = torch.load(checkpoint_path, map_location=self.device)
+        # Set weights_only=False to handle PyTorch 2.6+ compatibility
+        checkpoint = torch.load(checkpoint_path, map_location=self.device, weights_only=False)
         
         # Load model state dict (handle DDP wrapper if present)
         if self.distributed:
