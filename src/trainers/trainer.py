@@ -280,6 +280,9 @@ class ContinualTrainer:
             num_workers=(
                 data_loader.num_workers if hasattr(data_loader, "num_workers") else 0
             ),
+            persistent_workers=(
+                data_loader.persistent_workers if hasattr(data_loader, "persistent_workers") else False
+            ),
             pin_memory=(
                 data_loader.pin_memory if hasattr(data_loader, "pin_memory") else False
             ),
