@@ -1,3 +1,4 @@
+import glob
 import os
 from typing import Any, Dict, Optional, Tuple
 
@@ -795,10 +796,12 @@ class ContinualTrainer:
                 "epoch": epoch,
             }
             if test_loss is not None and test_acc is not None:
-                log_data.update({
-                    f"step_{step}/test_loss": test_loss,
-                    f"step_{step}/test_acc": test_acc,
-                })
+                log_data.update(
+                    {
+                        f"step_{step}/test_loss": test_loss,
+                        f"step_{step}/test_acc": test_acc,
+                    }
+                )
 
             wandb.log(log_data)
 
@@ -833,20 +836,22 @@ class ContinualTrainer:
             "config": self.config,
         }
 
-        # Create a descriptive filename with key hyperparameters
-        dataset_name = self.config["dataset"]["name"]
-        model_name = self.config["model"]["name"]
-        strategy = self.config["continual"]["strategy"]
+        # Get experiment name (includes timestamp)
+        experiment_name = self.config["experiment"]["name"]
+
+        # Create experiment-specific checkpoint directory
+        experiment_checkpoint_dir = os.path.join(self.checkpoint_dir, experiment_name)
+        os.makedirs(experiment_checkpoint_dir, exist_ok=True)
 
         if best:
             checkpoint_path = os.path.join(
-                self.checkpoint_dir,
-                f"{dataset_name}_{model_name}_{strategy}_step{step}_best.pth",
+                experiment_checkpoint_dir,
+                f"step{step}_best.pth",
             )
         else:
             checkpoint_path = os.path.join(
-                self.checkpoint_dir,
-                f"{dataset_name}_{model_name}_{strategy}_step{step}_epoch{epoch}.pth",
+                experiment_checkpoint_dir,
+                f"step{step}_epoch{epoch}.pth",
             )
 
         # Save checkpoint with _use_new_zipfile_serialization=True for better compatibility
@@ -860,18 +865,40 @@ class ContinualTrainer:
             step: Continual learning step to load
             best: Whether to load the best checkpoint
         """
-        # Create the same descriptive filename format used in _save_checkpoint
-        dataset_name = self.config["dataset"]["name"]
-        model_name = self.config["model"]["name"]
-        strategy = self.config["continual"]["strategy"]
+        # Get experiment name (includes timestamp)
+        experiment_name = self.config["experiment"]["name"]
+
+        # Use experiment-specific checkpoint directory
+        experiment_checkpoint_dir = os.path.join(self.checkpoint_dir, experiment_name)
+
+        if not os.path.exists(experiment_checkpoint_dir):
+            if not self.distributed or (self.distributed and self.local_rank == 0):
+                print(f"Checkpoint directory {experiment_checkpoint_dir} not found")
+            return
 
         if best:
             checkpoint_path = os.path.join(
-                self.checkpoint_dir,
-                f"{dataset_name}_{model_name}_{strategy}_step{step}_best.pth",
+                experiment_checkpoint_dir,
+                f"step{step}_best.pth",
             )
         else:
-            raise ValueError("Loading non-best checkpoints not implemented")
+            # Load the latest epoch checkpoint
+            checkpoint_files = glob.glob(
+                os.path.join(
+                    experiment_checkpoint_dir,
+                    f"step{step}_epoch*.pth",
+                )
+            )
+            if not checkpoint_files:
+                if not self.distributed or (self.distributed and self.local_rank == 0):
+                    print(f"No checkpoint found for step {step}")
+                return
+
+            # Sort by epoch number and get the latest
+            checkpoint_files.sort(
+                key=lambda x: int(x.split("_epoch")[-1].split(".")[0]), reverse=True
+            )
+            checkpoint_path = checkpoint_files[0]
 
         if not os.path.exists(checkpoint_path):
             if not self.distributed or (self.distributed and self.local_rank == 0):
