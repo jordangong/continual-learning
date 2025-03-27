@@ -30,9 +30,9 @@ class ClassifierHead(nn.Module):
         if classifier_type == "linear":
             self.classifier = nn.Linear(in_features, num_classes)
         elif classifier_type == "mlp":
-            assert (
-                hidden_dim is not None
-            ), "hidden_dim must be provided for MLP classifier"
+            assert hidden_dim is not None, (
+                "hidden_dim must be provided for MLP classifier"
+            )
             self.classifier = nn.Sequential(
                 nn.Linear(in_features, hidden_dim),
                 nn.ReLU(),

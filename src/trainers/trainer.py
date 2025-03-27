@@ -308,7 +308,7 @@ class ContinualTrainer:
         debug_enabled = self.debug_config.get("enabled", False)
         debug_prefix = "[DEBUG] " if debug_enabled else ""
         print(
-            f"{debug_prefix}=== Training Step {step+1}/{self.continual_config['num_steps']} ==="
+            f"{debug_prefix}=== Training Step {step + 1}/{self.continual_config['num_steps']} ==="
         )
 
         # Apply debug settings if enabled
@@ -392,7 +392,7 @@ class ContinualTrainer:
 
                 # Early stopping
                 if patience_counter >= self.training_config["early_stopping_patience"]:
-                    print(f"Early stopping at epoch {epoch+1}")
+                    print(f"Early stopping at epoch {epoch + 1}")
                     break
 
             # Step scheduler
@@ -403,7 +403,7 @@ class ContinualTrainer:
             if (epoch + 1) % self.training_config["save_every"] == 0:
                 self._save_checkpoint(step, epoch)
 
-        print(f"Best accuracy: {best_acc:.4f} at epoch {best_epoch+1}")
+        print(f"Best accuracy: {best_acc:.4f} at epoch {best_epoch + 1}")
 
         # Load best checkpoint
         self._load_checkpoint(step, best=True)
@@ -675,7 +675,7 @@ class ContinualTrainer:
         # Print metrics
         debug_prefix = "[DEBUG] " if debug_enabled else ""
         print(
-            f"{debug_prefix}Epoch {epoch+1}: "
+            f"{debug_prefix}Epoch {epoch + 1}: "
             f"Train Loss: {train_loss:.4f}, Train Acc: {train_acc:.2f}%, "
             f"Test Loss: {test_loss:.4f}, Test Acc: {test_acc:.2f}%"
         )

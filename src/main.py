@@ -138,23 +138,23 @@ def run_training(
             if logger:
                 # Log current step metrics
                 logger.info(
-                    f"Step {step+1}/{num_steps} - Accuracy: {metrics['accuracy']:.2f}%"
+                    f"Step {step + 1}/{num_steps} - Accuracy: {metrics['accuracy']:.2f}%"
                 )
                 if step > 0:
                     logger.info(
-                        f"Step {step+1}/{num_steps} - Forgetting: {metrics['forgetting']:.4f}"
+                        f"Step {step + 1}/{num_steps} - Forgetting: {metrics['forgetting']:.4f}"
                     )
 
                 # Calculate and log average metrics up to the current step
                 current_avg_acc = np.mean(accuracies)
                 logger.info(
-                    f"Step {step+1}/{num_steps} - Average accuracy so far: {current_avg_acc:.2f}%"
+                    f"Step {step + 1}/{num_steps} - Average accuracy so far: {current_avg_acc:.2f}%"
                 )
 
                 if len(forgetting_measures) > 0:
                     current_avg_fgt = np.mean(forgetting_measures)
                     logger.info(
-                        f"Step {step+1}/{num_steps} - Average forgetting so far: {current_avg_fgt:.4f}"
+                        f"Step {step + 1}/{num_steps} - Average forgetting so far: {current_avg_fgt:.4f}"
                     )
 
     # Only create plots and log final metrics on main process if distributed
