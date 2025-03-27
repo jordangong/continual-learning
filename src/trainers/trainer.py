@@ -368,7 +368,7 @@ class ContinualTrainer:
 
         for epoch in range(num_epochs):
             # Train for one epoch
-            train_loss, train_acc = self._train_epoch(train_loader, step)
+            train_loss, train_acc = self._train_epoch(train_loader, step, epoch)
 
             # Evaluate if needed
             if (epoch + 1) % self.training_config["eval_every"] == 0:
@@ -434,13 +434,14 @@ class ContinualTrainer:
             "forgetting": self.metrics["forgetting"][-1] if step > 0 else 0.0,
         }
 
-    def _train_epoch(self, train_loader: DataLoader, step: int) -> Tuple[float, float]:
+    def _train_epoch(self, train_loader: DataLoader, step: int, epoch: int) -> Tuple[float, float]:
         """
         Train for one epoch.
 
         Args:
             train_loader: Training data loader
             step: Current continual learning step
+            epoch: Current epoch
 
         Returns:
             Tuple of (train_loss, train_accuracy)
@@ -545,6 +546,7 @@ class ContinualTrainer:
                 postfix = {
                     "loss": total_loss / (train_iter.n + 1),
                     "acc": 100.0 * correct / total,
+                    "epoch": epoch + 1,
                 }
 
                 # Add more detailed info in verbose debug mode
