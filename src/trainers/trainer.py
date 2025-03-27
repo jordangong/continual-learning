@@ -1,15 +1,15 @@
 import os
-from typing import Dict, Any, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 import torch
 import torch.distributed as dist
 import torch.nn as nn
 import torch.optim as optim
+import wandb
 from torch import amp
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
-import wandb
 from tqdm import tqdm
 
 from src.utils.metrics import forgetting
@@ -135,8 +135,8 @@ class ContinualTrainer:
         # Setup optimizer
         self.optimizer = self._setup_optimizer()
 
-        # Setup scheduler
-        self.scheduler = self._setup_scheduler()
+        # Scheduler will be set up in train_step for each continual learning step
+        self.scheduler = None
 
         # Setup criterion
         self.criterion = nn.CrossEntropyLoss()
@@ -193,16 +193,35 @@ class ContinualTrainer:
             raise ValueError(f"Unsupported optimizer: {optimizer_name}")
 
     def _setup_scheduler(self) -> Optional[torch.optim.lr_scheduler._LRScheduler]:
-        """Setup scheduler based on configuration."""
+        """Setup scheduler based on configuration.
+        
+        Returns:
+            Configured learning rate scheduler
+        """
         scheduler_config = self.config["scheduler"]
         scheduler_name = scheduler_config["name"].lower()
-
+        use_global_scheduler = scheduler_config.get("global_scheduler", False)
+        
         if scheduler_name == "cosine":
-            return optim.lr_scheduler.CosineAnnealingLR(
-                self.optimizer,
-                T_max=self.training_config["num_epochs"],
-                eta_min=scheduler_config.get("min_lr", 0),
-            )
+            # Calculate T_max based on whether we're using a global scheduler
+            if use_global_scheduler:
+                # For global scheduler: total epochs across all steps
+                total_steps = self.continual_config["num_steps"]
+                epochs_per_step = self.training_config["num_epochs"]
+                total_epochs = total_steps * epochs_per_step
+                
+                return optim.lr_scheduler.CosineAnnealingLR(
+                    self.optimizer,
+                    T_max=total_epochs,
+                    eta_min=scheduler_config.get("min_lr", 0),
+                )
+            else:
+                # For per-step scheduler: just the epochs for this step
+                return optim.lr_scheduler.CosineAnnealingLR(
+                    self.optimizer,
+                    T_max=self.training_config["num_epochs"],
+                    eta_min=scheduler_config.get("min_lr", 0),
+                )
         elif scheduler_name == "step":
             return optim.lr_scheduler.StepLR(
                 self.optimizer,
@@ -281,7 +300,9 @@ class ContinualTrainer:
                 data_loader.num_workers if hasattr(data_loader, "num_workers") else 0
             ),
             persistent_workers=(
-                data_loader.persistent_workers if hasattr(data_loader, "persistent_workers") else False
+                data_loader.persistent_workers
+                if hasattr(data_loader, "persistent_workers")
+                else False
             ),
             pin_memory=(
                 data_loader.pin_memory if hasattr(data_loader, "pin_memory") else False
@@ -360,6 +381,27 @@ class ContinualTrainer:
                 num_epochs = self.training_config["num_epochs"]
         else:
             num_epochs = self.training_config["num_epochs"]
+            
+        # Get scheduler configuration
+        scheduler_config = self.config["scheduler"]
+        use_global_scheduler = scheduler_config.get("global_scheduler", False)
+        
+        # For per-step scheduler, reset both optimizer and scheduler
+        if not use_global_scheduler:
+            # Reset optimizer for this step
+            self.optimizer = self._setup_optimizer()
+            
+            # Setup a fresh scheduler for this continual learning step
+            self.scheduler = self._setup_scheduler()
+            
+            if not self.distributed or (self.distributed and self.local_rank == 0):
+                print(f"Initialized new optimizer and scheduler for step {step+1}/{self.continual_config['num_steps']}")
+        else:
+            # For global scheduler, only initialize once or update with current step
+            if self.scheduler is None:
+                self.scheduler = self._setup_scheduler()
+                if not self.distributed or (self.distributed and self.local_rank == 0):
+                    print("Initialized global scheduler across all steps")
 
         # Training loop
         best_acc = 0.0
@@ -434,7 +476,9 @@ class ContinualTrainer:
             "forgetting": self.metrics["forgetting"][-1] if step > 0 else 0.0,
         }
 
-    def _train_epoch(self, train_loader: DataLoader, step: int, epoch: int) -> Tuple[float, float]:
+    def _train_epoch(
+        self, train_loader: DataLoader, step: int, epoch: int
+    ) -> Tuple[float, float]:
         """
         Train for one epoch.
 
@@ -694,7 +738,9 @@ class ContinualTrainer:
 
             # Log learning rate
             lr = self.optimizer.param_groups[0]["lr"]
-            self.writer.add_scalar(f"step_{step}/learning_rate", lr, epoch)
+            self.writer.add_scalar("learning_rate", lr, epoch)
+            self.writer.add_scalar("step", step, epoch)
+            self.writer.add_scalar("epoch", epoch, epoch)
 
         # Log to Weights & Biases
         if self.logging_config["wandb"]:
@@ -704,7 +750,7 @@ class ContinualTrainer:
                     f"step_{step}/train_acc": train_acc,
                     f"step_{step}/test_loss": test_loss,
                     f"step_{step}/test_acc": test_acc,
-                    f"step_{step}/learning_rate": self.optimizer.param_groups[0]["lr"],
+                    "learning_rate": self.optimizer.param_groups[0]["lr"],
                     "step": step,
                     "epoch": epoch,
                 }
@@ -798,10 +844,13 @@ class ContinualTrainer:
         else:
             self.model.load_state_dict(checkpoint["model"])
 
-        self.optimizer.load_state_dict(checkpoint["optimizer"])
+        scheduler_config = self.config["scheduler"]
+        use_global_scheduler = scheduler_config.get("global_scheduler", False)
+        if not use_global_scheduler and best:
+            self.optimizer.load_state_dict(checkpoint["optimizer"])
 
-        if self.scheduler is not None and checkpoint["scheduler"] is not None:
-            self.scheduler.load_state_dict(checkpoint["scheduler"])
+            if self.scheduler is not None and checkpoint["scheduler"] is not None:
+                self.scheduler.load_state_dict(checkpoint["scheduler"])
 
     def _compute_ewc_data(self, train_loader: DataLoader):
         """
