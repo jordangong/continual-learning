@@ -380,7 +380,7 @@ class ContinualTrainer:
             # Limit the number of batches if fast_dev_run is enabled
             if self.debug_config.get("fast_dev_run", False):
                 # Only run a single epoch with a few batches
-                num_epochs = 1
+                self.training_config["num_epochs"] = num_epochs = 1
                 # Limit the number of batches
                 train_loader = self._limit_batches(train_loader, 3)  # Just 3 batches
                 test_loader = self._limit_batches(test_loader, 3)  # Just 3 batches
@@ -773,37 +773,44 @@ class ContinualTrainer:
         print(f"{debug_prefix}Epoch {epoch + 1}: {train_metrics}")
 
         # Log to TensorBoard
+        global_epoch = step * self.training_config["num_epochs"] + epoch
         if self.writer is not None:
-            self.writer.add_scalar(f"step_{step}/train_loss", train_loss, epoch)
-            self.writer.add_scalar(f"step_{step}/train_acc", train_acc, epoch)
+            self.writer.add_scalar("global/train_loss", train_loss, global_epoch)
+            self.writer.add_scalar(f"step_{step}/train_loss", train_loss, global_epoch)
+            self.writer.add_scalar(f"step_{step}/train_acc", train_acc, global_epoch)
             if test_loss is not None and test_acc is not None:
-                self.writer.add_scalar(f"step_{step}/test_loss", test_loss, epoch)
-                self.writer.add_scalar(f"step_{step}/test_acc", test_acc, epoch)
+                self.writer.add_scalar("global/test_loss", test_loss, global_epoch)
+                self.writer.add_scalar(
+                    f"step_{step}/test_loss", test_loss, global_epoch
+                )
+                self.writer.add_scalar(f"step_{step}/test_acc", test_acc, global_epoch)
 
             # Log learning rate
             lr = self.optimizer.param_groups[0]["lr"]
-            self.writer.add_scalar("learning_rate", lr, epoch)
-            self.writer.add_scalar("step", step, epoch)
-            self.writer.add_scalar("epoch", epoch, epoch)
+            self.writer.add_scalar("global/learning_rate", lr, global_epoch)
+            self.writer.add_scalar("global/step", step, global_epoch)
+            self.writer.add_scalar("global/epoch", epoch, global_epoch)
 
         # Log to Weights & Biases
         if self.logging_config["wandb"]:
             log_data = {
+                "global/train_loss": train_loss,
                 f"step_{step}/train_loss": train_loss,
                 f"step_{step}/train_acc": train_acc,
-                "learning_rate": self.optimizer.param_groups[0]["lr"],
-                "step": step,
-                "epoch": epoch,
+                "global/learning_rate": self.optimizer.param_groups[0]["lr"],
+                "global/step": step,
+                "global/epoch": epoch,
             }
             if test_loss is not None and test_acc is not None:
                 log_data.update(
                     {
+                        "global/test_loss": test_loss,
                         f"step_{step}/test_loss": test_loss,
                         f"step_{step}/test_acc": test_acc,
                     }
                 )
 
-            wandb.log(log_data)
+            wandb.log(log_data, step=global_epoch)
 
     def _save_checkpoint(self, step: int, epoch: int, best: bool = False):
         """

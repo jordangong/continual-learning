@@ -8,6 +8,7 @@ import numpy as np
 import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
+import wandb
 from omegaconf import DictConfig, OmegaConf
 
 from src.data.data_module import DataModule
@@ -141,28 +142,57 @@ def run_training(
             forgetting_measures.append(metrics["forgetting"])
 
         # Log metrics (only on main process if distributed)
-        if not distributed or (distributed and rank == 0):
-            if logger:
-                # Log current step metrics
+        if not distributed or (distributed and rank == 0) and logger is not None:
+            logger.info(
+                f"Step {step + 1}/{num_steps} - Accuracy: {metrics['accuracy']:.2f}%"
+            )
+            if step > 0:
                 logger.info(
-                    f"Step {step + 1}/{num_steps} - Accuracy: {metrics['accuracy']:.2f}%"
+                    f"Step {step + 1}/{num_steps} - Forgetting: {metrics['forgetting']:.4f}"
+                )
+
+            # Calculate and log average metrics up to the current step
+            current_avg_acc = np.mean(accuracies)
+            logger.info(
+                f"Step {step + 1}/{num_steps} - Average accuracy so far: {current_avg_acc:.2f}%"
+            )
+
+            if len(forgetting_measures) > 0:
+                current_avg_fgt = np.mean(forgetting_measures)
+                logger.info(
+                    f"Step {step + 1}/{num_steps} - Average forgetting so far: {current_avg_fgt:.4f}"
+                )
+
+            # Log step-level metrics to TensorBoard
+            global_epoch = (step + 1) * config["training"]["num_epochs"] - 1
+            if config["logging"]["tensorboard"] and trainer.writer is not None:
+                trainer.writer.add_scalar(
+                    "global/accuracy", metrics["accuracy"], global_epoch
                 )
                 if step > 0:
-                    logger.info(
-                        f"Step {step + 1}/{num_steps} - Forgetting: {metrics['forgetting']:.4f}"
+                    trainer.writer.add_scalar(
+                        "global/forgetting", metrics["forgetting"], global_epoch
                     )
-
-                # Calculate and log average metrics up to the current step
-                current_avg_acc = np.mean(accuracies)
-                logger.info(
-                    f"Step {step + 1}/{num_steps} - Average accuracy so far: {current_avg_acc:.2f}%"
+                trainer.writer.add_scalar(
+                    "global/avg_accuracy", current_avg_acc, global_epoch
                 )
-
                 if len(forgetting_measures) > 0:
-                    current_avg_fgt = np.mean(forgetting_measures)
-                    logger.info(
-                        f"Step {step + 1}/{num_steps} - Average forgetting so far: {current_avg_fgt:.4f}"
+                    trainer.writer.add_scalar(
+                        "global/avg_forgetting", current_avg_fgt, global_epoch
                     )
+
+            # Log step-level metrics to Weights & Biases
+            if config["logging"]["wandb"]:
+                log_data = {
+                    "global/accuracy": metrics["accuracy"],
+                    "global/avg_accuracy": current_avg_acc,
+                }
+                if step > 0:
+                    log_data["global/forgetting"] = metrics["forgetting"]
+                if len(forgetting_measures) > 0:
+                    log_data["global/avg_forgetting"] = current_avg_fgt
+
+                wandb.log(log_data, step=global_epoch)
 
     # Only create plots and log final metrics on main process if distributed
     if not distributed or (distributed and rank == 0):
