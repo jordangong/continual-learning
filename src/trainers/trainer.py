@@ -303,6 +303,9 @@ class ContinualTrainer:
                     config=self.config,
                     dir=wandb_dir,
                     name=self.config["experiment"]["name"],
+                    job_type="debug"
+                    if self.debug_config.get("enabled", False)
+                    else "train",
                 )
         else:
             self.writer = None
