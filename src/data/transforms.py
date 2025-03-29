@@ -23,27 +23,37 @@ def get_transforms(
     """
     if augmentation is None:
         augmentation = {
-            "random_crop": True,
+            "random_resized_crop": True,
+            "random_crop": False,
             "random_horizontal_flip": True,
             "color_jitter": False,
             "auto_augment": False,
+            "auto_augment_policy": "imagenet",
         }
 
     # Base test transform (always applied)
     test_transform = transforms.Compose(
         [
-            transforms.Resize((input_size, input_size)),
+            transforms.Resize(input_size),
+            transforms.CenterCrop(input_size),
             transforms.ToTensor(),
             transforms.Normalize(mean=mean, std=std),
         ]
     )
 
     # Start with basic transforms
-    train_transforms = [transforms.Resize((input_size, input_size))]
+    train_transforms = []
 
     # Add augmentations based on config
-    if augmentation.get("random_crop", False):
-        train_transforms.append(transforms.RandomCrop(input_size, padding=4))
+    if augmentation.get("random_resized_crop", False):
+        train_transforms.append(transforms.RandomResizedCrop(input_size))
+    else:
+        # Fall back to traditional resize if random_resized_crop is disabled
+        train_transforms.append(transforms.Resize((input_size, input_size)))
+
+        # Add random crop if enabled
+        if augmentation.get("random_crop", False):
+            train_transforms.append(transforms.RandomCrop(input_size, padding=4))
 
     if augmentation.get("random_horizontal_flip", False):
         train_transforms.append(transforms.RandomHorizontalFlip())
@@ -56,9 +66,17 @@ def get_transforms(
         )
 
     if augmentation.get("auto_augment", False):
-        train_transforms.append(
-            transforms.AutoAugment(transforms.AutoAugmentPolicy.CIFAR10)
-        )
+        policy = augmentation.get("auto_augment_policy", "imagenet")
+        if policy == "cifar10":
+            policy = transforms.AutoAugmentPolicy.CIFAR10
+        elif policy == "imagenet":
+            policy = transforms.AutoAugmentPolicy.IMAGENET
+        elif policy == "svhn":
+            policy = transforms.AutoAugmentPolicy.SVHN
+        else:
+            raise ValueError(f"Unknown auto_augment_policy: {policy}")
+
+        train_transforms.append(transforms.AutoAugment(policy))
 
     # Add final transforms
     train_transforms.extend(
