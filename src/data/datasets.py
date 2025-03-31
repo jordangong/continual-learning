@@ -21,6 +21,7 @@ class ContinualDataset:
         num_steps: int,
         classes_per_step: int,
         transform: Optional[Callable] = None,
+        test_transform: Optional[Callable] = None,
         target_transform: Optional[Callable] = None,
         download: bool = True,
         seed: int = 42,
@@ -30,7 +31,8 @@ class ContinualDataset:
             root: Root directory for dataset
             num_steps: Number of continual learning steps
             classes_per_step: Number of classes per step
-            transform: Transform to apply to data
+            transform: Transform to apply to training data
+            test_transform: Transform to apply to test data (if None, uses transform)
             target_transform: Transform to apply to targets
             download: Whether to download the dataset
             seed: Random seed for reproducibility
@@ -39,6 +41,9 @@ class ContinualDataset:
         self.num_steps = num_steps
         self.classes_per_step = classes_per_step
         self.transform = transform
+        self.test_transform = (
+            test_transform if test_transform is not None else transform
+        )
         self.target_transform = target_transform
         self.download = download
         self.seed = seed
@@ -236,6 +241,7 @@ class CIFAR100CL(ContinualDataset):
         num_steps: int,
         classes_per_step: int,
         transform: Optional[Callable] = None,
+        test_transform: Optional[Callable] = None,
         target_transform: Optional[Callable] = None,
         download: bool = True,
         seed: int = 42,
@@ -246,6 +252,7 @@ class CIFAR100CL(ContinualDataset):
             num_steps=num_steps,
             classes_per_step=classes_per_step,
             transform=transform,
+            test_transform=test_transform,
             target_transform=target_transform,
             download=download,
             seed=seed,
@@ -278,7 +285,7 @@ class CIFAR100CL(ContinualDataset):
         self.dataset_test = datasets.CIFAR100(
             root=self.root,
             train=False,
-            transform=self.transform,
+            transform=self.test_transform,
             target_transform=self.target_transform,
             download=self.download,
         )
@@ -293,6 +300,7 @@ class CUB200CL(ContinualDataset):
         num_steps: int,
         classes_per_step: int,
         transform: Optional[Callable] = None,
+        test_transform: Optional[Callable] = None,
         target_transform: Optional[Callable] = None,
         download: bool = True,
         seed: int = 42,
@@ -303,6 +311,7 @@ class CUB200CL(ContinualDataset):
             num_steps=num_steps,
             classes_per_step=classes_per_step,
             transform=transform,
+            test_transform=test_transform,
             target_transform=target_transform,
             download=download,
             seed=seed,
@@ -390,7 +399,7 @@ class CUB200CL(ContinualDataset):
             train_images, train_targets, transform=self.transform, remove_border=True
         )
         self.dataset_test = ImageListDataset(
-            test_images, test_targets, transform=self.transform, remove_border=True
+            test_images, test_targets, transform=self.test_transform, remove_border=True
         )
 
 
@@ -403,6 +412,7 @@ class ImageNetRCL(ContinualDataset):
         num_steps: int,
         classes_per_step: int,
         transform: Optional[Callable] = None,
+        test_transform: Optional[Callable] = None,
         target_transform: Optional[Callable] = None,
         download: bool = True,
         seed: int = 42,
@@ -414,6 +424,7 @@ class ImageNetRCL(ContinualDataset):
             num_steps=num_steps,
             classes_per_step=classes_per_step,
             transform=transform,
+            test_transform=test_transform,
             target_transform=target_transform,
             download=download,
             seed=seed,
@@ -447,11 +458,12 @@ class ImageNetRCL(ContinualDataset):
 
         # ImageNet-R follows the ImageFolder structure, but doesn't have a train/test split
         # We'll create our own split
-        dataset = ImageFolder(dataset_path, transform=self.transform)
+        train_dataset = ImageFolder(dataset_path, transform=self.transform)
+        test_dataset = ImageFolder(dataset_path, transform=self.test_transform)
 
         # Create train/test split
         class_indices = defaultdict(list)
-        for idx, (_, target) in enumerate(dataset.samples):
+        for idx, (_, target) in enumerate(train_dataset.samples):
             class_indices[target].append(idx)
 
         train_indices = []
@@ -465,8 +477,8 @@ class ImageNetRCL(ContinualDataset):
             test_indices.extend(indices[split_idx:])
 
         # Create train and test datasets
-        self.dataset_train = Subset(dataset, train_indices)
-        self.dataset_test = Subset(dataset, test_indices)
+        self.dataset_train = Subset(train_dataset, train_indices)
+        self.dataset_test = Subset(test_dataset, test_indices)
 
 
 class ImageNetACL(ContinualDataset):
@@ -478,6 +490,7 @@ class ImageNetACL(ContinualDataset):
         num_steps: int,
         classes_per_step: int,
         transform: Optional[Callable] = None,
+        test_transform: Optional[Callable] = None,
         target_transform: Optional[Callable] = None,
         download: bool = True,
         seed: int = 42,
@@ -489,6 +502,7 @@ class ImageNetACL(ContinualDataset):
             num_steps=num_steps,
             classes_per_step=classes_per_step,
             transform=transform,
+            test_transform=test_transform,
             target_transform=target_transform,
             download=download,
             seed=seed,
@@ -522,11 +536,12 @@ class ImageNetACL(ContinualDataset):
 
         # ImageNet-A follows the ImageFolder structure, but doesn't have a train/test split
         # We'll create our own split
-        dataset = ImageFolder(dataset_path, transform=self.transform)
+        train_dataset = ImageFolder(dataset_path, transform=self.transform)
+        test_dataset = ImageFolder(dataset_path, transform=self.test_transform)
 
         # Create train/test split
         class_indices = defaultdict(list)
-        for idx, (_, target) in enumerate(dataset.samples):
+        for idx, (_, target) in enumerate(train_dataset.samples):
             class_indices[target].append(idx)
 
         train_indices = []
@@ -540,8 +555,8 @@ class ImageNetACL(ContinualDataset):
             test_indices.extend(indices[split_idx:])
 
         # Create train and test datasets
-        self.dataset_train = Subset(dataset, train_indices)
-        self.dataset_test = Subset(dataset, test_indices)
+        self.dataset_train = Subset(train_dataset, train_indices)
+        self.dataset_test = Subset(test_dataset, test_indices)
 
 
 class ObjectNetCL(ContinualDataset):
@@ -553,6 +568,7 @@ class ObjectNetCL(ContinualDataset):
         num_steps: int,
         classes_per_step: int,
         transform: Optional[Callable] = None,
+        test_transform: Optional[Callable] = None,
         target_transform: Optional[Callable] = None,
         download: bool = True,
         seed: int = 42,
@@ -564,6 +580,7 @@ class ObjectNetCL(ContinualDataset):
             num_steps=num_steps,
             classes_per_step=classes_per_step,
             transform=transform,
+            test_transform=test_transform,
             target_transform=target_transform,
             download=download,
             seed=seed,
@@ -643,7 +660,7 @@ class ObjectNetCL(ContinualDataset):
             train_images, train_targets, transform=self.transform, remove_border=True
         )
         self.dataset_test = ImageListDataset(
-            test_images, test_targets, transform=self.transform, remove_border=True
+            test_images, test_targets, transform=self.test_transform, remove_border=True
         )
 
 
@@ -659,6 +676,7 @@ class OmniBenchCL(ContinualDataset):
         num_steps: int,
         classes_per_step: int,
         transform: Optional[Callable] = None,
+        test_transform: Optional[Callable] = None,
         target_transform: Optional[Callable] = None,
         download: bool = True,
         seed: int = 42,
@@ -671,6 +689,7 @@ class OmniBenchCL(ContinualDataset):
             num_steps=num_steps,
             classes_per_step=classes_per_step,
             transform=transform,
+            test_transform=test_transform,
             target_transform=target_transform,
             download=download,
             seed=seed,
@@ -885,7 +904,7 @@ class OmniBenchCL(ContinualDataset):
             train_images, train_targets, transform=self.transform
         )
         self.dataset_test = ImageListDataset(
-            test_images, test_targets, transform=self.transform
+            test_images, test_targets, transform=self.test_transform
         )
 
     def _load_category_data(self, category, label_offset=0):
@@ -970,6 +989,7 @@ class VTABCL(ContinualDataset):
         num_steps: int,
         classes_per_step: int,
         transform: Optional[Callable] = None,
+        test_transform: Optional[Callable] = None,
         target_transform: Optional[Callable] = None,
         download: bool = True,
         seed: int = 42,
@@ -981,6 +1001,7 @@ class VTABCL(ContinualDataset):
             num_steps=num_steps,
             classes_per_step=classes_per_step,
             transform=transform,
+            test_transform=test_transform,
             target_transform=target_transform,
             download=download,
             seed=seed,
@@ -1045,17 +1066,18 @@ class VTABCL(ContinualDataset):
         if os.path.exists(train_path) and os.path.exists(test_path):
             # If the dataset follows the standard structure
             self.dataset_train = ImageFolder(train_path, transform=self.transform)
-            self.dataset_test = ImageFolder(test_path, transform=self.transform)
+            self.dataset_test = ImageFolder(test_path, transform=self.test_transform)
         else:
             # If the dataset has a different structure, we need to manually create the datasets
             # For simplicity, we'll assume the dataset follows an ImageFolder-like structure
             # but without the train/test split
 
-            # Create a dataset from the root
-            dataset = ImageFolder(dataset_path, transform=self.transform)
+            # Create datasets from the root with appropriate transforms
+            train_dataset = ImageFolder(dataset_path, transform=self.transform)
+            test_dataset = ImageFolder(dataset_path, transform=self.test_transform)
 
             # Create train/test split
-            indices = list(range(len(dataset)))
+            indices = list(range(len(train_dataset)))
             np.random.shuffle(indices)
             split_idx = int(len(indices) * 0.8)  # 80% for training
 
@@ -1063,8 +1085,8 @@ class VTABCL(ContinualDataset):
             test_indices = indices[split_idx:]
 
             # Create train and test datasets
-            self.dataset_train = Subset(dataset, train_indices)
-            self.dataset_test = Subset(dataset, test_indices)
+            self.dataset_train = Subset(train_dataset, train_indices)
+            self.dataset_test = Subset(test_dataset, test_indices)
 
 
 class ImageListDataset(Dataset):

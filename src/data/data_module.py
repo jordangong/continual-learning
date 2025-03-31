@@ -1,5 +1,5 @@
 import os
-from typing import Dict, Tuple, Optional, Any
+from typing import Any, Dict, Optional, Tuple
 
 import torch
 from torch.utils.data import DataLoader
@@ -7,11 +7,11 @@ from torch.utils.data import DataLoader
 from src.data.datasets import (
     CIFAR100CL,
     CUB200CL,
-    ImageNetRCL,
+    VTABCL,
     ImageNetACL,
+    ImageNetRCL,
     ObjectNetCL,
     OmniBenchCL,
-    VTABCL,
 )
 from src.data.transforms import get_transforms
 
@@ -54,6 +54,7 @@ class DataModule:
                 num_steps=self.continual_config["num_steps"],
                 classes_per_step=self.continual_config["classes_per_step"],
                 transform=self.train_transform,
+                test_transform=self.test_transform,
                 target_transform=None,
                 download=True,
                 seed=self.config["seed"],
@@ -64,6 +65,7 @@ class DataModule:
                 num_steps=self.continual_config["num_steps"],
                 classes_per_step=self.continual_config["classes_per_step"],
                 transform=self.train_transform,
+                test_transform=self.test_transform,
                 target_transform=None,
                 download=True,
                 seed=self.config["seed"],
@@ -74,6 +76,7 @@ class DataModule:
                 num_steps=self.continual_config["num_steps"],
                 classes_per_step=self.continual_config["classes_per_step"],
                 transform=self.train_transform,
+                test_transform=self.test_transform,
                 target_transform=None,
                 download=True,
                 seed=self.config["seed"],
@@ -85,6 +88,7 @@ class DataModule:
                 num_steps=self.continual_config["num_steps"],
                 classes_per_step=self.continual_config["classes_per_step"],
                 transform=self.train_transform,
+                test_transform=self.test_transform,
                 target_transform=None,
                 download=True,
                 seed=self.config["seed"],
@@ -96,6 +100,7 @@ class DataModule:
                 num_steps=self.continual_config["num_steps"],
                 classes_per_step=self.continual_config["classes_per_step"],
                 transform=self.train_transform,
+                test_transform=self.test_transform,
                 target_transform=None,
                 download=True,
                 seed=self.config["seed"],
@@ -107,6 +112,7 @@ class DataModule:
                 num_steps=self.continual_config["num_steps"],
                 classes_per_step=self.continual_config["classes_per_step"],
                 transform=self.train_transform,
+                test_transform=self.test_transform,
                 target_transform=None,
                 download=True,
                 seed=self.config["seed"],
@@ -119,6 +125,7 @@ class DataModule:
                 num_steps=self.continual_config["num_steps"],
                 classes_per_step=self.continual_config["classes_per_step"],
                 transform=self.train_transform,
+                test_transform=self.test_transform,
                 target_transform=None,
                 download=True,
                 seed=self.config["seed"],
