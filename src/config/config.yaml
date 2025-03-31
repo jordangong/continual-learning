@@ -49,6 +49,7 @@ training:
   mixed_precision:
     enabled: true              # Enable mixed precision training
     dtype: "auto"              # Options: auto, bfloat16, float16 (auto will use bfloat16 if supported, otherwise float16)
+    eval: true                 # Enable mixed precision during evaluation
 
 # ======================================================
 # OUTPUT AND LOGGING

@@ -59,6 +59,9 @@ class ContinualTrainer:
         self.mixed_precision_enabled = self.training_config.get(
             "mixed_precision", {}
         ).get("enabled", False)
+        self.mixed_precision_eval = self.training_config.get(
+            "mixed_precision", {}
+        ).get("eval", False)
         mixed_precision_dtype = self.training_config.get("mixed_precision", {}).get(
             "dtype", "auto"
         )
@@ -67,7 +70,7 @@ class ContinualTrainer:
         self.device_type = "cuda" if "cuda" in self.device.type else "cpu"
 
         # Determine the appropriate dtype for mixed precision
-        if self.mixed_precision_enabled:
+        if self.mixed_precision_enabled or self.mixed_precision_eval:
             # CPU only supports bfloat16 for mixed precision
             if self.device_type == "cpu":
                 if mixed_precision_dtype in ["auto", "bfloat16"]:
@@ -83,11 +86,13 @@ class ContinualTrainer:
                             f"Warning: bfloat16 not supported on this CPU. Disabling mixed precision. Error: {e}"
                         )
                         self.mixed_precision_enabled = False
+                        self.mixed_precision_eval = False
                 else:
                     print(
                         f"Warning: {mixed_precision_dtype} not supported on CPU. Disabling mixed precision."
                     )
                     self.mixed_precision_enabled = False
+                    self.mixed_precision_eval = False
             # CUDA device handling
             elif self.device_type == "cuda":
                 if mixed_precision_dtype == "auto":
@@ -109,6 +114,7 @@ class ContinualTrainer:
                             "Warning: bfloat16 requested but not supported by GPU. Disabling mixed precision."
                         )
                         self.mixed_precision_enabled = False
+                        self.mixed_precision_eval = False
                 elif mixed_precision_dtype == "float16":
                     self.mixed_precision_dtype = torch.float16
                     print("Using float16 mixed precision training on CUDA")
@@ -117,11 +123,13 @@ class ContinualTrainer:
                         f"Warning: Unknown mixed precision dtype '{mixed_precision_dtype}'. Disabling mixed precision."
                     )
                     self.mixed_precision_enabled = False
+                    self.mixed_precision_eval = False
             else:
                 print(
                     f"Warning: Mixed precision not supported on device type '{self.device_type}'. Disabling mixed precision."
                 )
                 self.mixed_precision_enabled = False
+                self.mixed_precision_eval = False
 
             # Initialize GradScaler for float16 (not needed for bfloat16)
             if (
@@ -700,7 +708,7 @@ class ContinualTrainer:
                 inputs, targets = inputs.to(self.device), targets.to(self.device)
 
                 # Use mixed precision for evaluation if enabled
-                if self.mixed_precision_enabled:
+                if self.mixed_precision_eval:
                     with amp.autocast(
                         device_type=self.device_type, dtype=self.mixed_precision_dtype
                     ):
