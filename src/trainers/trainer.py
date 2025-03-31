@@ -725,7 +725,7 @@ class ContinualTrainer:
                     loss = self.criterion(outputs, targets)
 
                 # Update metrics
-                total_loss += loss.item()
+                total_loss += loss.item() * inputs.size(0)
                 _, predicted = outputs.max(1)
                 total += targets.size(0)
                 correct += predicted.eq(targets).sum().item()
@@ -734,7 +734,7 @@ class ContinualTrainer:
                 if should_show_pbar:
                     test_iter.set_postfix(
                         {
-                            "loss": total_loss / (test_iter.n + 1),
+                            "loss": total_loss / total,
                             "acc": 100.0 * correct / total,
                         }
                     )
@@ -748,7 +748,7 @@ class ContinualTrainer:
             dist.all_reduce(metrics, op=dist.ReduceOp.SUM)
             total_loss, correct, total = metrics.tolist()
 
-        test_loss = total_loss / len(test_loader)
+        test_loss = total_loss / total
         test_acc = 100.0 * correct / total
 
         return test_loss, test_acc
