@@ -29,23 +29,30 @@ def get_transforms(
             "color_jitter": False,
             "auto_augment": False,
             "auto_augment_policy": "imagenet",
+            "test_center_crop": True,
         }
 
-    # Base test transform (always applied)
-    test_transform = transforms.Compose(
-        [
-            transforms.Resize(input_size),
+    # Test transform
+    if augmentation.get("test_center_crop", True):
+        resize_size = int((256 / 224) * input_size)
+        test_transforms = [
+            transforms.Resize(resize_size),
             transforms.CenterCrop(input_size),
-            transforms.ToTensor(),
-            transforms.Normalize(mean=mean, std=std),
         ]
+    else:
+        test_transforms = [transforms.Resize(input_size)]
+
+    test_transforms.extend(
+        [transforms.ToTensor(), transforms.Normalize(mean=mean, std=std)]
     )
+
+    test_transform = transforms.Compose(test_transforms)
 
     # Start with basic transforms
     train_transforms = []
 
     # Add augmentations based on config
-    if augmentation.get("random_resized_crop", False):
+    if augmentation.get("random_resized_crop", True):
         train_transforms.append(transforms.RandomResizedCrop(input_size))
     else:
         # Fall back to traditional resize if random_resized_crop is disabled
@@ -55,7 +62,7 @@ def get_transforms(
         if augmentation.get("random_crop", False):
             train_transforms.append(transforms.RandomCrop(input_size, padding=4))
 
-    if augmentation.get("random_horizontal_flip", False):
+    if augmentation.get("random_horizontal_flip", True):
         train_transforms.append(transforms.RandomHorizontalFlip())
 
     if augmentation.get("color_jitter", False):
