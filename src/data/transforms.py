@@ -40,7 +40,7 @@ def get_transforms(
             transforms.CenterCrop(input_size),
         ]
     else:
-        test_transforms = [transforms.Resize(input_size)]
+        test_transforms = [transforms.Resize((input_size, input_size))]
 
     test_transforms.extend(
         [transforms.ToTensor(), transforms.Normalize(mean=mean, std=std)]
