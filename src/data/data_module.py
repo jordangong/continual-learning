@@ -151,6 +151,7 @@ class DataModule:
         return self.dataset.get_data_loaders(
             step=step,
             batch_size=self.training_config["batch_size"],
+            eval_batch_size=self.training_config["eval_batch_size"],
             num_workers=self.config["num_workers"],
             memory_data=memory_data,
             distributed_sampler=distributed_sampler,

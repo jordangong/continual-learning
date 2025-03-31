@@ -60,6 +60,7 @@ class ContinualDataset:
         self,
         step: int,
         batch_size: int,
+        eval_batch_size: Optional[int] = None,
         num_workers: int = 4,
         memory_data: Optional[Dataset] = None,
         distributed_sampler: bool = False,
@@ -71,6 +72,7 @@ class ContinualDataset:
         Args:
             step: Current continual learning step
             batch_size: Batch size for data loaders
+            eval_batch_size: Batch size for evaluation
             num_workers: Number of workers for data loaders
             memory_data: Optional memory data to include in training
             distributed_sampler: Whether to use distributed sampler for multi-GPU training
@@ -134,7 +136,7 @@ class ContinualDataset:
 
             test_loader = DataLoader(
                 test_dataset,
-                batch_size=batch_size,
+                batch_size=(batch_size if eval_batch_size is None else eval_batch_size),
                 shuffle=False,
                 num_workers=num_workers,
                 persistent_workers=True,
@@ -154,7 +156,7 @@ class ContinualDataset:
 
             test_loader = DataLoader(
                 test_dataset,
-                batch_size=batch_size,
+                batch_size=(batch_size if eval_batch_size is None else eval_batch_size),
                 shuffle=False,
                 num_workers=num_workers,
                 persistent_workers=True,
