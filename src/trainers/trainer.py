@@ -304,6 +304,12 @@ class ContinualTrainer:
                 if wandb_dir:
                     os.makedirs(wandb_dir, exist_ok=True)
 
+                if self.debug_config.get("enabled", False):
+                    job_type = "debug"
+                elif self.config.get("eval_only", False):
+                    job_type = "eval"
+                else:
+                    job_type = "train"
                 # Initialize wandb with experiment name from config
                 wandb.init(
                     project=self.logging_config["wandb_project"],
@@ -311,9 +317,7 @@ class ContinualTrainer:
                     config=self.config,
                     dir=wandb_dir,
                     name=self.config["experiment"]["name"],
-                    job_type="debug"
-                    if self.debug_config.get("enabled", False)
-                    else "train",
+                    job_type=job_type,
                 )
         else:
             self.writer = None

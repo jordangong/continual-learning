@@ -15,6 +15,7 @@ from src.data.data_module import DataModule
 from src.models.model_factory import create_model
 from src.trainers.trainer import ContinualTrainer
 from src.utils.logging import plot_accuracy_curve, plot_forgetting_curve, setup_logger
+from src.utils.metrics import forgetting
 
 
 def set_seed(seed: int) -> None:
@@ -66,6 +67,9 @@ def run_training(
     # Convert config to dictionary
     config = OmegaConf.to_container(cfg, resolve=True)
 
+    # Check if eval_only mode is enabled
+    eval_only = config.get("eval_only", False)
+
     # Set random seed
     set_seed(config["seed"])
 
@@ -111,10 +115,14 @@ def run_training(
         local_rank=rank if distributed else -1,
     )
 
-    # Train on each step
+    # Train or evaluate on each step
     num_steps = config["continual"]["num_steps"]
     accuracies = []
     forgetting_measures = []
+
+    # If eval_only is True, we'll only evaluate the model without training
+    if eval_only and not distributed or (eval_only and distributed and rank == 0):
+        print("Running in evaluation-only mode. Loading model from checkpoint...")
 
     for step in range(num_steps):
         # Get data loaders for current step
@@ -127,14 +135,33 @@ def run_training(
             world_size=world_size,
         )
 
-        # Train on current step
+        # Train or evaluate on current step
         start_time = time.time()
-        metrics = trainer.train_step(step, train_loader, test_loader)
-        train_time = time.time() - start_time
-        if not distributed or (distributed and rank == 0):
-            print(
-                f"Step {step + 1}/{num_steps} training time: {train_time:.2f} seconds"
-            )
+
+        if eval_only:
+            # Load model from checkpoint and evaluate
+            trainer._load_checkpoint(step, best=True)
+            # Evaluate model on test data
+            _, test_acc = trainer._evaluate(test_loader)
+            metrics = {"accuracy": test_acc}
+            if step > 0:
+                # Calculate forgetting measure if not the first step
+                # This assumes previous steps have been evaluated already
+                prev_accuracies = accuracies.copy()
+                metrics["forgetting"] = forgetting(prev_accuracies)
+            eval_time = time.time() - start_time
+            if not distributed or (distributed and rank == 0):
+                print(
+                    f"Step {step + 1}/{num_steps} evaluation time: {eval_time:.2f} seconds"
+                )
+        else:
+            # Train as usual
+            metrics = trainer.train_step(step, train_loader, test_loader)
+            train_time = time.time() - start_time
+            if not distributed or (distributed and rank == 0):
+                print(
+                    f"Step {step + 1}/{num_steps} training time: {train_time:.2f} seconds"
+                )
 
         # Record metrics
         accuracies.append(metrics["accuracy"])
@@ -237,6 +264,8 @@ def main(cfg: DictConfig) -> None:
     Args:
         cfg: Configuration
     """
+    # Get eval_only setting from config
+    eval_only = cfg.get("eval_only", False)
     # Get distributed training configuration from Hydra config
     distributed_enabled = cfg.get("distributed", {}).get("enabled", False)
     world_size = cfg.get("distributed", {}).get("world_size", torch.cuda.device_count())
@@ -249,7 +278,9 @@ def main(cfg: DictConfig) -> None:
 
     # Run distributed training if enabled and multiple GPUs are available
     if distributed_enabled and world_size > 1:
-        print(f"Running distributed training on {world_size} GPUs")
+        print(
+            f"Running distributed {'evaluation' if eval_only else 'training'} on {world_size} GPUs"
+        )
         mp.spawn(run_training, args=(world_size, cfg), nprocs=world_size, join=True)
     else:
         # Run on a single GPU or CPU

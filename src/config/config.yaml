@@ -22,6 +22,7 @@ experiment:
 seed: 42
 device: cuda
 num_workers: 4
+eval_only: false
 
 # Distributed training configuration
 distributed:
