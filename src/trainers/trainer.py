@@ -55,13 +55,21 @@ class ContinualTrainer:
         # Debug configuration
         self.debug_config = config.get("debug", {"enabled": False})
 
+        # Gradient clipping configuration
+        self.gradient_clipping_enabled = self.training_config.get(
+            "gradient_clipping", {}
+        ).get("enabled", False)
+        self.gradient_clipping_max_norm = self.training_config.get(
+            "gradient_clipping", {}
+        ).get("max_norm", 1.0)
+
         # Mixed precision training setup
         self.mixed_precision_enabled = self.training_config.get(
             "mixed_precision", {}
         ).get("enabled", False)
-        self.mixed_precision_eval = self.training_config.get(
-            "mixed_precision", {}
-        ).get("eval", False)
+        self.mixed_precision_eval = self.training_config.get("mixed_precision", {}).get(
+            "eval", False
+        )
         mixed_precision_dtype = self.training_config.get("mixed_precision", {}).get(
             "dtype", "auto"
         )
@@ -600,7 +608,15 @@ class ContinualTrainer:
                     # Scale loss and do backward pass
                     self.scaler.scale(loss).backward()
 
-                    # Unscale gradients and call optimizer.step()
+                    # Unscale gradients before clipping
+                    if self.gradient_clipping_enabled:
+                        self.scaler.unscale_(self.optimizer)
+                        torch.nn.utils.clip_grad_norm_(
+                            self.model.parameters(),
+                            self.gradient_clipping_max_norm,
+                        )
+
+                    # Call optimizer.step() with scaler
                     self.scaler.step(self.optimizer)
 
                     # Update the scaler for next iteration
@@ -608,6 +624,14 @@ class ContinualTrainer:
                 else:
                     # For bfloat16, regular backward pass is stable
                     loss.backward()
+
+                    # Apply gradient clipping if enabled
+                    if self.gradient_clipping_enabled:
+                        torch.nn.utils.clip_grad_norm_(
+                            self.model.parameters(),
+                            self.gradient_clipping_max_norm,
+                        )
+
                     self.optimizer.step()
             else:
                 # Standard precision training
@@ -629,6 +653,12 @@ class ContinualTrainer:
 
                 # Backward pass
                 loss.backward()
+
+                # Apply gradient clipping if enabled
+                if self.gradient_clipping_enabled:
+                    torch.nn.utils.clip_grad_norm_(
+                        self.model.parameters(), self.gradient_clipping_max_norm
+                    )
 
                 # Update weights
                 self.optimizer.step()

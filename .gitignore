@@ -4,6 +4,9 @@
 # Outputs (includes logs, checkpoints, wandb, and hydra runs)
 outputs/
 
+# Results
+results/
+
 # Cache
 cache/
 

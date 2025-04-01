@@ -47,6 +47,9 @@ training:
   eval_every: 1                # Evaluate every N epochs
   save_every: 10               # Save checkpoint every N epochs
   early_stopping_patience: 10  # Patience for early stopping
+  gradient_clipping:
+    enabled: true              # Enable gradient clipping
+    max_norm: 1.0              # Maximum norm of gradients
   mixed_precision:
     enabled: true              # Enable mixed precision training
     dtype: "auto"              # Options: auto, bfloat16, float16 (auto will use bfloat16 if supported, otherwise float16)
