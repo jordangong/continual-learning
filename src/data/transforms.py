@@ -24,6 +24,8 @@ def get_transforms(
     if augmentation is None:
         augmentation = {
             "random_resized_crop": True,
+            "random_resized_crop_scale": (0.08, 1.0),
+            "random_resized_crop_ratio": (3 / 4, 4 / 3),
             "random_crop": False,
             "random_horizontal_flip": True,
             "color_jitter": False,
@@ -53,7 +55,9 @@ def get_transforms(
 
     # Add augmentations based on config
     if augmentation.get("random_resized_crop", True):
-        train_transforms.append(transforms.RandomResizedCrop(input_size))
+        scale = augmentation.get("random_resized_crop_scale", (0.08, 1.0))
+        ratio = augmentation.get("random_resized_crop_ratio", (3 / 4, 4 / 3))
+        train_transforms.append(transforms.RandomResizedCrop(input_size, scale=scale, ratio=ratio))
     else:
         # Fall back to traditional resize if random_resized_crop is disabled
         train_transforms.append(transforms.Resize((input_size, input_size)))

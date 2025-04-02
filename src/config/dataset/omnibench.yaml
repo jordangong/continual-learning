@@ -30,6 +30,8 @@ max_classes: 300   # Maximum number of classes to use when category is 'all'
 # - watercraft
 augmentation:
   random_resized_crop: true
+  random_resized_crop_scale: [0.08, 1.0]
+  random_resized_crop_ratio: [0.75, 1.3333333333333333]
   random_crop: false
   random_horizontal_flip: true
   color_jitter: true
