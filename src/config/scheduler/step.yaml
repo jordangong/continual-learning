@@ -1,0 +1,4 @@
+name: step
+step_size: 30
+gamma: 0.1
+global_scheduler: false  # If true, uses a single scheduler across all continual learning steps

@@ -1,0 +1,4 @@
+name: multistep
+milestones: [30, 60, 90]
+gamma: 0.1
+global_scheduler: false  # If true, uses a single scheduler across all continual learning steps
