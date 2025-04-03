@@ -1,7 +1,9 @@
 import glob
 import json
 import os
+import threading
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor
 from typing import Callable, List, Optional, Tuple
 
 import numpy as np
@@ -53,6 +55,11 @@ class ContinualDataset:
         self.dataset_test = None
         self.num_classes = None
         self.class_order = None
+        
+        # Cache for dataset indices by class
+        self._class_indices_cache = {}
+        self._cache_lock = threading.Lock()
+        self._cache_initialized = {}
 
         # Set random seed for reproducibility
         np.random.seed(self.seed)
@@ -176,14 +183,79 @@ class ContinualDataset:
         end_idx = min((step + 1) * self.classes_per_step, self.num_classes)
         return self.class_order[start_idx:end_idx]
 
+    def _initialize_class_indices_cache(self, dataset: Dataset, num_workers: int = 4) -> None:
+        """Initialize the class indices cache for a dataset using multithreading.
+        
+        Args:
+            dataset: The dataset to scan
+            num_workers: Number of threads to use for scanning
+        """
+        dataset_id = id(dataset)
+        if dataset_id in self._cache_initialized and self._cache_initialized[dataset_id]:
+            return
+        
+        with self._cache_lock:
+            # Check again in case another thread initialized the cache while we were waiting
+            if dataset_id in self._cache_initialized and self._cache_initialized[dataset_id]:
+                return
+                
+            print(f"Initializing class indices cache for dataset {dataset_id}...")
+            
+            # Create a defaultdict to store indices by class
+            class_indices = defaultdict(list)
+            dataset_size = len(dataset)
+            
+            # Function to process a chunk of the dataset
+            def process_chunk(start_idx, end_idx):
+                chunk_indices = defaultdict(list)
+                for i in range(start_idx, min(end_idx, dataset_size)):
+                    _, target = dataset[i]
+                    chunk_indices[target].append(i)
+                return chunk_indices
+            
+            # Split the dataset into chunks for parallel processing
+            chunk_size = max(1, dataset_size // num_workers)
+            chunks = [(i, min(i + chunk_size, dataset_size)) for i in range(0, dataset_size, chunk_size)]
+            
+            # Process chunks in parallel
+            with ThreadPoolExecutor(max_workers=num_workers) as executor:
+                chunk_results = list(executor.map(lambda x: process_chunk(*x), chunks))
+            
+            # Merge results from all chunks
+            for chunk_result in chunk_results:
+                for target, indices in chunk_result.items():
+                    class_indices[target].extend(indices)
+            
+            # Store the cache
+            self._class_indices_cache[dataset_id] = dict(class_indices)
+            self._cache_initialized[dataset_id] = True
+            print(f"Class indices cache initialized for dataset {dataset_id} with {len(class_indices)} classes")
+
     def _get_indices_for_classes(
         self, dataset: Dataset, classes: List[int]
     ) -> List[int]:
-        """Get indices of samples belonging to specified classes."""
+        """Get indices of samples belonging to specified classes.
+        
+        Uses a cached mapping of classes to indices for efficiency with large datasets.
+        The cache is initialized on the first call using multithreading.
+        """
+        dataset_id = id(dataset)
+        
+        # Initialize cache if not already done
+        if not hasattr(self, '_class_indices_cache'):
+            self._class_indices_cache = {}
+            self._cache_lock = threading.Lock()
+            self._cache_initialized = {}
+            
+        if dataset_id not in self._cache_initialized or not self._cache_initialized[dataset_id]:
+            self._initialize_class_indices_cache(dataset)
+        
+        # Get indices from cache
         indices = []
-        for i, (_, target) in enumerate(dataset):
-            if target in classes:
-                indices.append(i)
+        for cls in classes:
+            if cls in self._class_indices_cache[dataset_id]:
+                indices.extend(self._class_indices_cache[dataset_id][cls])
+        
         return indices
 
     def get_memory_samples(self, step: int, memory_size: int) -> Optional[Dataset]:
