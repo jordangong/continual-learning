@@ -148,7 +148,7 @@ def run_training(
         if config["model"]["classifier"]["type"] == "prototypical":
             # Only print on main process if distributed
             if not distributed or (distributed and rank == 0):
-                print(f"\n=== Initializing prototypes for step {step} ===")
+                print(f"\n=== Initializing prototypes for step {step + 1}/{num_steps} ===")
 
             # Get the correct model reference
             model_to_use = model.module if distributed else model
