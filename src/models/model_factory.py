@@ -208,6 +208,7 @@ class PretrainedModel(nn.Module):
         self.source = model_config["source"]
         self.pretrained = model_config.get("pretrained", True)
         self.freeze_backbone = model_config.get("freeze_backbone", False)
+        self.freeze_classifier = model_config.get("freeze_classifier", False)
         self.device = (
             device
             if device is not None
@@ -239,6 +240,11 @@ class PretrainedModel(nn.Module):
             dropout=dropout,
             device=self.device,
         )
+
+        # Freeze classifier if specified
+        if self.freeze_classifier:
+            for param in self.classifier.parameters():
+                param.requires_grad = False
 
     def _load_backbone(self) -> Tuple[nn.Module, int]:
         """Load backbone model based on configuration."""

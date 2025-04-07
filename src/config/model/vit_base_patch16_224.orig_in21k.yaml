@@ -2,6 +2,7 @@ name: vit_base_patch16_224.orig_in21k
 source: timm  # Options: timm, openclip
 pretrained: true
 freeze_backbone: false  # Whether to freeze the backbone during training
+freeze_classifier: false  # Whether to freeze the classifier during training
 feature_dim: 768  # Feature dimension for ViT base
 classifier:
   type: linear  # Options: linear, mlp
