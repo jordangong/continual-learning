@@ -135,12 +135,30 @@ def run_training(
             world_size=world_size,
         )
 
+        # Initialize prototypes if using prototypical classifier
+        if config["model"]["classifier"]["type"] == "prototypical":
+            # Only print on main process if distributed
+            if not distributed or (distributed and rank == 0):
+                print(f"\n=== Initializing prototypes for step {step} ===")
+
+            # Get the correct model reference
+            model_to_use = model.module if distributed else model
+
+            # For incremental learning, only reset prototypes on the first step
+            # This ensures we maintain prototypes for previous classes
+            reset_prototypes = step == 0
+
+            # Initialize prototypes from training data
+            model_to_use.init_prototypes_from_data(train_loader, reset=reset_prototypes)
+
         # Train or evaluate on current step
         start_time = time.time()
 
         if eval_only:
-            # Load model from checkpoint and evaluate
-            trainer._load_checkpoint(step, best=True)
+            if config["continual"]["strategy"] != "zeroshot":
+                # Load model from checkpoint and evaluate
+                trainer._load_checkpoint(step, best=True)
+
             # Evaluate model on test data
             _, test_acc = trainer._evaluate(test_loader)
             metrics = {"accuracy": test_acc}
@@ -148,7 +166,7 @@ def run_training(
                 # Calculate forgetting measure if not the first step
                 # This assumes previous steps have been evaluated already
                 prev_accuracies = accuracies.copy()
-                metrics["forgetting"] = forgetting(prev_accuracies)
+                metrics["forgetting"] = forgetting(prev_accuracies + [test_acc], step)
             eval_time = time.time() - start_time
             if not distributed or (distributed and rank == 0):
                 print(
