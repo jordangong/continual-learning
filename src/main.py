@@ -135,6 +135,15 @@ def run_training(
             world_size=world_size,
         )
 
+        # Apply debug settings to limit data loaders if enabled
+        train_loader, test_loader = data_module.limit_data_loaders(
+            train_loader,
+            test_loader,
+            config.get("debug", {"enabled": False}),
+            distributed=distributed,
+            local_rank=rank if distributed else -1,
+        )
+
         # Initialize prototypes if using prototypical classifier
         if config["model"]["classifier"]["type"] == "prototypical":
             # Only print on main process if distributed

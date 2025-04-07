@@ -330,49 +330,6 @@ class ContinualTrainer:
         else:
             self.writer = None
 
-    def _limit_batches(self, data_loader: DataLoader, num_batches: int) -> DataLoader:
-        """
-        Limit the number of batches in a data loader.
-
-        Args:
-            data_loader: Data loader to limit
-            num_batches: Number of batches to keep
-
-        Returns:
-            Limited data loader
-        """
-        # Create a subset of the dataset with only the first num_batches * batch_size samples
-        batch_size = data_loader.batch_size
-        subset_size = min(num_batches * batch_size, len(data_loader.dataset))
-
-        # Create a subset of the dataset
-        indices = list(range(subset_size))
-        subset = torch.utils.data.Subset(data_loader.dataset, indices)
-
-        # Create a new data loader with the subset
-        limited_loader = DataLoader(
-            subset,
-            batch_size=batch_size,
-            shuffle=data_loader.shuffle if hasattr(data_loader, "shuffle") else False,
-            num_workers=(
-                data_loader.num_workers if hasattr(data_loader, "num_workers") else 0
-            ),
-            persistent_workers=(
-                data_loader.persistent_workers
-                if hasattr(data_loader, "persistent_workers")
-                else False
-            ),
-            pin_memory=(
-                data_loader.pin_memory if hasattr(data_loader, "pin_memory") else False
-            ),
-            sampler=None,  # We're using a subset, so we don't need a sampler
-            drop_last=(
-                data_loader.drop_last if hasattr(data_loader, "drop_last") else False
-            ),
-        )
-
-        return limited_loader
-
     def train_step(
         self, step: int, train_loader: DataLoader, test_loader: DataLoader
     ) -> Dict[str, float]:
@@ -394,49 +351,9 @@ class ContinualTrainer:
         )
 
         # Apply debug settings if enabled
-        if debug_enabled:
-            # Print debug information
-            if not self.distributed or (self.distributed and self.local_rank == 0):
-                print("\n[DEBUG MODE ENABLED]")
-                print(f"Debug settings: {self.debug_config}")
-
-            # Limit the number of batches if fast_dev_run is enabled
-            if self.debug_config.get("fast_dev_run", False):
-                # Only run a single epoch with a few batches
-                self.training_config["num_epochs"] = num_epochs = 1
-                # Limit the number of batches
-                train_loader = self._limit_batches(train_loader, 3)  # Just 3 batches
-                test_loader = self._limit_batches(test_loader, 3)  # Just 3 batches
-                if not self.distributed or (self.distributed and self.local_rank == 0):
-                    print("[DEBUG] Fast dev run: Running only 1 epoch with 3 batches")
-            else:
-                # Apply batch limits if specified
-                train_limit = self.debug_config.get("limit_train_batches", 1.0)
-                val_limit = self.debug_config.get("limit_val_batches", 1.0)
-
-                if train_limit < 1.0:
-                    train_loader = self._limit_batches(
-                        train_loader, int(len(train_loader) * train_limit)
-                    )
-                    if not self.distributed or (
-                        self.distributed and self.local_rank == 0
-                    ):
-                        print(
-                            f"[DEBUG] Limited training to {train_limit * 100}% of batches ({len(train_loader)} batches)"
-                        )
-
-                if val_limit < 1.0:
-                    test_loader = self._limit_batches(
-                        test_loader, int(len(test_loader) * val_limit)
-                    )
-                    if not self.distributed or (
-                        self.distributed and self.local_rank == 0
-                    ):
-                        print(
-                            f"[DEBUG] Limited validation to {val_limit * 100}% of batches ({len(test_loader)} batches)"
-                        )
-
-                num_epochs = self.training_config["num_epochs"]
+        if debug_enabled and self.debug_config.get("fast_dev_run", False):
+            # Only run a single epoch with a few batches in fast_dev_run mode
+            self.training_config["num_epochs"] = num_epochs = 1
         else:
             num_epochs = self.training_config["num_epochs"]
 
