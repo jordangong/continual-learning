@@ -120,9 +120,7 @@ class PrototypicalClassifier(nn.Module):
         # Compute cosine similarity
         logits = torch.matmul(x_norm, prototypes_norm.t())
 
-        # Scale logits (optional, can be adjusted)
-        temperature = 0.1
-        return logits / temperature
+        return logits
 
 
 class ClassifierHead(nn.Module):
@@ -135,6 +133,7 @@ class ClassifierHead(nn.Module):
         classifier_type: str = "linear",
         hidden_dim: Optional[int] = None,
         dropout: float = 0.0,
+        temperature: float = 1.0,
         device: Optional[torch.device] = None,
     ):
         """
@@ -144,9 +143,12 @@ class ClassifierHead(nn.Module):
             classifier_type: Type of classifier (linear, mlp, or prototypical)
             hidden_dim: Hidden dimension for MLP (only used if classifier_type is mlp)
             dropout: Dropout probability
+            temperature: Temperature scaling parameter for logits
             device: Optional device to place tensors on (used by prototypical)
         """
         super().__init__()
+        self.classifier_type = classifier_type
+        self.temperature = temperature
 
         if classifier_type == "linear":
             self.classifier = nn.Linear(in_features, num_classes)
@@ -161,13 +163,16 @@ class ClassifierHead(nn.Module):
                 nn.Linear(hidden_dim, num_classes),
             )
         elif classifier_type == "prototypical":
-            self.classifier = PrototypicalClassifier(in_features, num_classes, device)
+            self.classifier = PrototypicalClassifier(
+                in_features, num_classes, device=device
+            )
         else:
             raise ValueError(f"Unsupported classifier type: {classifier_type}")
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Forward pass."""
-        return self.classifier(x)
+        """Forward pass with temperature scaling."""
+        logits = self.classifier(x)
+        return logits / self.temperature
 
     def update_prototypes(self, features: torch.Tensor, labels: torch.Tensor) -> None:
         """Update prototypes if using prototypical classifier."""
@@ -231,6 +236,7 @@ class PretrainedModel(nn.Module):
         classifier_type = classifier_config.get("type", "linear")
         hidden_dim = classifier_config.get("hidden_dim", None)
         dropout = classifier_config.get("dropout", 0.0)
+        temperature = classifier_config.get("temperature", 1.0)
 
         self.classifier = ClassifierHead(
             in_features=self.feature_dim,
@@ -238,6 +244,7 @@ class PretrainedModel(nn.Module):
             classifier_type=classifier_type,
             hidden_dim=hidden_dim,
             dropout=dropout,
+            temperature=temperature,
             device=self.device,
         )
 

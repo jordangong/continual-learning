@@ -5,6 +5,7 @@ freeze_backbone: false  # Whether to freeze the backbone during training
 freeze_classifier: false  # Whether to freeze the classifier during training
 feature_dim: 768  # Feature dimension for ViT base
 classifier:
-  type: linear  # Options: linear, mlp
+  type: linear  # Options: linear, mlp, prototypical
   hidden_dim: 512  # Only used if type is mlp
   dropout: 0.1
+  temperature: 1.0  # Temperature scaling parameter for logits (lower values make predictions more confident)
