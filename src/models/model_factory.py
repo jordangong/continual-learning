@@ -32,8 +32,9 @@ class PrototypicalClassifier(nn.Module):
             else torch.device("cuda" if torch.cuda.is_available() else "cpu")
         )
 
-        # Initialize prototypes with zeros, they will be computed during training
-        self.register_buffer("prototypes", torch.zeros(num_classes, in_features))
+        # Initialize prototypes as learnable parameters
+        self.prototypes = nn.Parameter(torch.zeros(num_classes, in_features))
+        # Keep counts as buffer since they're not learnable
         self.register_buffer(
             "prototype_counts", torch.zeros(num_classes, dtype=torch.long)
         )
@@ -63,16 +64,16 @@ class PrototypicalClassifier(nn.Module):
             total_count = current_count + class_count
 
             if total_count > 0:  # Avoid division by zero
-                self.prototypes[c] = (
-                    current_count * self.prototypes[c] + class_features.sum(dim=0)
+                # Use .data to modify the parameter without triggering autograd
+                new_prototype = (
+                    current_count * self.prototypes[c].data + class_features.sum(dim=0)
                 ) / total_count
+                self.prototypes.data[c] = new_prototype
                 self.prototype_counts[c] = total_count
 
         # Mark prototypes as initialized if any were updated
         if features.size(0) > 0:
             self.prototypes_initialized = True
-
-    # Removed init_prototypes_from_data method as it's now handled at the model level
 
     def compute_prototypes(
         self,
@@ -89,7 +90,9 @@ class PrototypicalClassifier(nn.Module):
         """
         # Reset prototypes and counts if requested
         if reset:
-            self.prototypes.zero_()
+            # For learnable parameters, we need to avoid in-place operations
+            # Create a new tensor with zeros instead of using zero_()
+            self.prototypes.data = torch.zeros_like(self.prototypes)
             self.prototype_counts.zero_()
 
         # Process each batch of features and labels
