@@ -374,7 +374,7 @@ class PretrainedModel(nn.Module):
             if (i + 1) % 10 == 0 or i == len(features_list) - 1:
                 # Compute prototypes for this chunk
                 self.compute_prototypes(
-                    features_device_list, labels_device_list, reset=reset
+                    features_device_list, labels_device_list, reset=(reset and i == 0)
                 )
 
                 # Clear lists to free memory
