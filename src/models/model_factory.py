@@ -15,6 +15,7 @@ class PrototypicalClassifier(nn.Module):
         self,
         in_features: int,
         num_classes: int,
+        normalize: bool = True,
         device: Optional[torch.device] = None,
     ):
         """
@@ -26,6 +27,7 @@ class PrototypicalClassifier(nn.Module):
         super().__init__()
         self.in_features = in_features
         self.num_classes = num_classes
+        self.normalize = normalize
         self.device = (
             device
             if device is not None
@@ -103,25 +105,28 @@ class PrototypicalClassifier(nn.Module):
         self.prototypes_initialized = True
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Forward pass using cosine similarity between features and prototypes.
+        """Forward pass using similarity between features and prototypes.
 
         Args:
             x: Input features [batch_size, in_features]
 
         Returns:
-            Logits based on cosine similarity [batch_size, num_classes]
+            Logits based on similarity [batch_size, num_classes]
         """
         # Check if prototypes have been initialized
         if not self.prototypes_initialized:
             # Return zeros if prototypes haven't been initialized yet
             return torch.zeros(x.size(0), self.num_classes, device=x.device)
 
-        # Normalize feature vectors and prototypes
-        x_norm = F.normalize(x, p=2, dim=1)
-        prototypes_norm = F.normalize(self.prototypes, p=2, dim=1)
-
-        # Compute cosine similarity
-        logits = torch.matmul(x_norm, prototypes_norm.t())
+        if self.normalize:
+            # Normalize feature vectors and prototypes for cosine similarity
+            x_features = F.normalize(x, p=2, dim=1)
+            prototypes_features = F.normalize(self.prototypes, p=2, dim=1)
+            # Compute cosine similarity
+            logits = torch.matmul(x_features, prototypes_features.t())
+        else:
+            # Use dot product without normalization
+            logits = torch.matmul(x, self.prototypes.t())
 
         return logits
 
@@ -137,6 +142,7 @@ class ClassifierHead(nn.Module):
         hidden_dim: Optional[int] = None,
         dropout: float = 0.0,
         temperature: float = 1.0,
+        normalize: bool = True,
         device: Optional[torch.device] = None,
     ):
         """
@@ -167,7 +173,7 @@ class ClassifierHead(nn.Module):
             )
         elif classifier_type == "prototypical":
             self.classifier = PrototypicalClassifier(
-                in_features, num_classes, device=device
+                in_features, num_classes, normalize=normalize, device=device
             )
         else:
             raise ValueError(f"Unsupported classifier type: {classifier_type}")
@@ -240,6 +246,7 @@ class PretrainedModel(nn.Module):
         hidden_dim = classifier_config.get("hidden_dim", None)
         dropout = classifier_config.get("dropout", 0.0)
         temperature = classifier_config.get("temperature", 1.0)
+        normalize = classifier_config.get("normalize", False)
 
         self.classifier = ClassifierHead(
             in_features=self.feature_dim,
@@ -248,6 +255,7 @@ class PretrainedModel(nn.Module):
             hidden_dim=hidden_dim,
             dropout=dropout,
             temperature=temperature,
+            normalize=normalize,
             device=self.device,
         )
 

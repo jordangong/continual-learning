@@ -8,4 +8,5 @@ classifier:
   type: linear  # Options: linear, mlp
   hidden_dim: 512  # Only used if type is mlp
   dropout: 0.1
+  normalize: false
   temperature: 1.0

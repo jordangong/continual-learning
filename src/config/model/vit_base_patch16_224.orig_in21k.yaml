@@ -8,4 +8,5 @@ classifier:
   type: linear  # Options: linear, mlp, prototypical
   hidden_dim: 512  # Only used if type is mlp
   dropout: 0.1
+  normalize: false
   temperature: 1.0  # Temperature scaling parameter for logits (lower values make predictions more confident)
