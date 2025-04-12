@@ -38,6 +38,7 @@ continual:
   classes_per_step: 10         # Number of classes per step
   memory_size: 2000            # Size of memory buffer for rehearsal (if used)
   strategy: "finetune"         # Options: finetune, ewc, replay, zeroshot etc.
+  mask_logits: true            # Enable logit masking for non-current task classes, except replay samples
 
 # Training hyperparameters
 training:

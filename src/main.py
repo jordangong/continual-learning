@@ -127,7 +127,7 @@ def run_training(
     for step in range(num_steps):
         # Get data loaders for current step
         memory_data = data_module.get_memory_samples(step) if step > 0 else None
-        train_loader, test_loader = data_module.get_data_loaders(
+        step_classes, train_loader, test_loader = data_module.get_data_loaders(
             step,
             memory_data,
             distributed_sampler=distributed,
@@ -185,7 +185,7 @@ def run_training(
                 )
         else:
             # Train as usual
-            metrics = trainer.train_step(step, train_loader, test_loader)
+            metrics = trainer.train_step(step, step_classes, train_loader, test_loader)
             train_time = time.time() - start_time
             if not distributed or (distributed and rank == 0):
                 print(

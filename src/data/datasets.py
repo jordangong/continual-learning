@@ -92,7 +92,7 @@ class ContinualDataset:
             world_size: Number of processes (for distributed training)
 
         Returns:
-            Tuple of (train_loader, test_loader)
+            Tuple of (step_classes, train_loader, test_loader)
         """
         if step >= self.num_steps:
             raise ValueError(
@@ -175,7 +175,7 @@ class ContinualDataset:
                 pin_memory=True,
             )
 
-        return train_loader, test_loader
+        return step_classes, train_loader, test_loader
 
     def _get_step_classes(self, step: int) -> List[int]:
         """Get classes for a specific step."""

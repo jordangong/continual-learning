@@ -153,7 +153,7 @@ class DataModule:
             world_size: Number of processes (for distributed training)
 
         Returns:
-            Tuple of (train_loader, test_loader)
+            Tuple of (step_classes, train_loader, test_loader)
         """
         return self.dataset.get_data_loaders(
             step=step,

@@ -1,6 +1,6 @@
 import glob
 import os
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import torch
 import torch.distributed as dist
@@ -51,6 +51,12 @@ class ContinualTrainer:
         # Training configuration
         self.training_config = config["training"]
         self.continual_config = config["continual"]
+
+        # Class logit masking configuration
+        self.mask_logits = self.continual_config.get("mask_logits", False)
+
+        # Class tracking for logit masking
+        self.current_task_classes = None  # Classes in current step
 
         # Debug configuration
         self.debug_config = config.get("debug", {"enabled": False})
@@ -331,7 +337,11 @@ class ContinualTrainer:
             self.writer = None
 
     def train_step(
-        self, step: int, train_loader: DataLoader, test_loader: DataLoader
+        self,
+        step: int,
+        step_classes: List[int],
+        train_loader: DataLoader,
+        test_loader: DataLoader,
     ) -> Dict[str, float]:
         """
         Train for one continual learning step.
@@ -349,6 +359,10 @@ class ContinualTrainer:
         print(
             f"{debug_prefix}=== Training Step {step + 1}/{self.continual_config['num_steps']} ==="
         )
+
+        # Set current task classes for logit masking
+        if self.mask_logits:
+            self.current_task_classes = set(step_classes)
 
         # Apply debug settings if enabled
         if debug_enabled and self.debug_config.get("fast_dev_run", False):
@@ -507,6 +521,9 @@ class ContinualTrainer:
                     # Forward pass
                     outputs = self.model(inputs)
 
+                    # Apply logit masking if enabled
+                    outputs = self._apply_logit_masking(outputs, targets)
+
                     # Compute loss
                     loss = self.criterion(outputs, targets)
 
@@ -554,6 +571,9 @@ class ContinualTrainer:
                 # Standard precision training
                 # Forward pass
                 outputs = self.model(inputs)
+
+                # Apply logit masking if enabled
+                outputs = self._apply_logit_masking(outputs, targets)
 
                 # Compute loss
                 loss = self.criterion(outputs, targets)
@@ -950,6 +970,48 @@ class ContinualTrainer:
         # Store EWC data
         self.ewc_data = {"fisher": fisher, "params": params}
 
+    def _apply_logit_masking(
+        self,
+        outputs: torch.Tensor,
+        targets: torch.Tensor,
+    ) -> torch.Tensor:
+        """
+        Apply logit masking to restrict predictions to current task classes.
+
+        Args:
+            outputs: Model output logits [batch_size, num_classes]
+            targets: Target labels [batch_size]
+
+        Returns:
+            Masked logits [batch_size, num_classes]
+        """
+        if not self.mask_logits or self.current_task_classes is None:
+            return outputs
+
+        # Create a mask for replay samples
+        replay_mask = torch.zeros_like(outputs, dtype=torch.bool)
+
+        # For each target in the batch, check if it's from replay
+        for i, target in enumerate(targets):
+            target_class = target.item()
+            if target_class not in self.current_task_classes:
+                # This is a replay sample, don't mask this sample
+                replay_mask[i, :] = True
+
+        # Create a mask for current task classes
+        class_mask = torch.zeros_like(outputs, dtype=torch.bool)
+        for cls in self.current_task_classes:
+            class_mask[:, cls] = True
+
+        # Combine masks: keep current task classes and allowed classes for replay samples
+        combined_mask = class_mask | replay_mask
+
+        # Apply negative infinity to mask out non-current task logits
+        masked_outputs = outputs.clone()
+        masked_outputs[~combined_mask] = -torch.inf
+
+        return masked_outputs
+
     def _compute_ewc_loss(self) -> torch.Tensor:
         """
         Compute EWC loss.
@@ -973,5 +1035,3 @@ class ContinualTrainer:
                 ).sum()
 
         return loss
-
-    # Note: Memory sample retrieval is handled by the DataModule class
