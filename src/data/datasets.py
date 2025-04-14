@@ -10,8 +10,7 @@ import numpy as np
 import torch
 from PIL import Image
 from torch.utils.data import DataLoader, Dataset, DistributedSampler, Subset
-from torchvision import datasets
-from torchvision.datasets import ImageFolder
+from torchvision.datasets import CIFAR100, Caltech256, ImageFolder, StanfordCars
 
 
 class ContinualDataset:
@@ -362,7 +361,7 @@ class CIFAR100CL(ContinualDataset):
 
     def setup(self):
         """Setup CIFAR-100 dataset."""
-        self.dataset_train = datasets.CIFAR100(
+        self.dataset_train = CIFAR100(
             root=self.root,
             train=True,
             transform=self.transform,
@@ -370,7 +369,7 @@ class CIFAR100CL(ContinualDataset):
             download=self.download,
         )
 
-        self.dataset_test = datasets.CIFAR100(
+        self.dataset_test = CIFAR100(
             root=self.root,
             train=False,
             transform=self.test_transform,
@@ -488,6 +487,156 @@ class CUB200CL(ContinualDataset):
         )
         self.dataset_test = ImageListDataset(
             test_images, test_targets, transform=self.test_transform, remove_border=True
+        )
+
+
+class Caltech256CL(ContinualDataset):
+    """Caltech256 dataset for continual learning."""
+
+    def __init__(
+        self,
+        root: str,
+        num_steps: int,
+        classes_per_step: int,
+        transform: Optional[Callable] = None,
+        test_transform: Optional[Callable] = None,
+        target_transform: Optional[Callable] = None,
+        download: bool = True,
+        seed: int = 42,
+        class_order: Optional[List[int]] = None,
+        train_ratio: float = 0.8,  # Caltech256 doesn't have a train/test split, so we create one
+    ):
+        super().__init__(
+            root=root,
+            num_steps=num_steps,
+            classes_per_step=classes_per_step,
+            transform=transform,
+            test_transform=test_transform,
+            target_transform=target_transform,
+            download=download,
+            seed=seed,
+        )
+
+        self.train_ratio = train_ratio
+
+        # Caltech256 has 256 classes (excluding clutter class)
+        self.num_classes = 256
+
+        # Set class order (either provided or random)
+        if class_order is None:
+            self.class_order = list(range(self.num_classes))
+            np.random.shuffle(self.class_order)
+        else:
+            assert len(class_order) == self.num_classes, (
+                "Class order must contain all classes"
+            )
+            self.class_order = class_order
+
+        self.setup()
+
+    def setup(self):
+        """Setup Caltech256 dataset excluding the clutter class (class 256)."""
+        # Load the dataset
+        dataset = Caltech256(
+            root=self.root,
+            transform=None,  # We'll apply transforms later
+            target_transform=self.target_transform,
+            download=self.download,
+        )
+
+        # Filter out the clutter class (class 256)
+        filtered_indices = [i for i, (_, target) in enumerate(dataset) if target != 256]
+
+        # Create train/test split from filtered indices
+        np.random.shuffle(filtered_indices)
+        split_idx = int(len(filtered_indices) * self.train_ratio)
+
+        train_indices = filtered_indices[:split_idx]
+        test_indices = filtered_indices[split_idx:]
+
+        # Create subsets with appropriate transforms
+        self.dataset_train = TransformSubset(dataset, train_indices, self.transform)
+        self.dataset_test = TransformSubset(dataset, test_indices, self.test_transform)
+
+
+class TransformSubset(Dataset):
+    """Subset of a dataset with a different transform."""
+
+    def __init__(self, dataset, indices, transform=None):
+        self.dataset = dataset
+        self.indices = indices
+        self.transform = transform
+
+    def __len__(self):
+        return len(self.indices)
+
+    def __getitem__(self, idx):
+        img, target = self.dataset[self.indices[idx]]
+
+        if self.transform is not None:
+            img = self.transform(img)
+
+        return img, target
+
+
+class StanfordCarsCL(ContinualDataset):
+    """Stanford Cars dataset for continual learning."""
+
+    def __init__(
+        self,
+        root: str,
+        num_steps: int,
+        classes_per_step: int,
+        transform: Optional[Callable] = None,
+        test_transform: Optional[Callable] = None,
+        target_transform: Optional[Callable] = None,
+        download: bool = True,
+        seed: int = 42,
+        class_order: Optional[List[int]] = None,
+    ):
+        super().__init__(
+            root=root,
+            num_steps=num_steps,
+            classes_per_step=classes_per_step,
+            transform=transform,
+            test_transform=test_transform,
+            target_transform=target_transform,
+            download=download,
+            seed=seed,
+        )
+
+        # Stanford Cars has 196 classes
+        self.num_classes = 196
+
+        # Set class order (either provided or random)
+        if class_order is None:
+            self.class_order = list(range(self.num_classes))
+            np.random.shuffle(self.class_order)
+        else:
+            assert len(class_order) == self.num_classes, (
+                "Class order must contain all classes"
+            )
+            self.class_order = class_order
+
+        self.setup()
+
+    def setup(self):
+        """Setup Stanford Cars dataset."""
+        # Load the train and test datasets
+        self.dataset_train = StanfordCars(
+            root=self.root,
+            split="train",
+            transform=self.transform,
+            target_transform=self.target_transform,
+            download=self.download,
+        )
+
+        self.dataset_test = StanfordCars(
+            root=self.root,
+            split="test",
+            transform=self.test_transform,
+            target_transform=self.target_transform,
+            download=self.download,
         )
 
 

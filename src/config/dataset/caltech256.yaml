@@ -1,0 +1,16 @@
+name: caltech256
+input_size: 224  # Resize to match pretrained model input size
+mean: [0.485, 0.456, 0.406]  # ImageNet mean
+std: [0.229, 0.224, 0.225]   # ImageNet std
+num_classes: 256  # Caltech256 has 256 classes (excluding clutter class)
+train_ratio: 0.8  # Ratio of data to use for training (since Caltech256 doesn't have a train/test split)
+augmentation:
+  random_resized_crop: true
+  random_resized_crop_scale: [0.08, 1.0]
+  random_resized_crop_ratio: [0.75, 1.3333333333333333]
+  random_crop: false
+  random_horizontal_flip: true
+  color_jitter: true
+  auto_augment: false
+  auto_augment_policy: "imagenet"
+  test_center_crop: true

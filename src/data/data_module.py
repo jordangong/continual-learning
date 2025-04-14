@@ -8,12 +8,14 @@ from src.data.datasets import (
     CIFAR100CL,
     CUB200CL,
     VTABCL,
+    Caltech256CL,
     DomainNetCL,
     ImageNetACL,
     ImageNetRCL,
-    ObjectNetCL,
     ObjectNet200CL,
+    ObjectNetCL,
     OmniBenchCL,
+    StanfordCarsCL,
 )
 from src.data.transforms import get_transforms
 
@@ -63,6 +65,29 @@ class DataModule:
             )
         elif dataset_name == "cub200":
             self.dataset = CUB200CL(
+                root=self.data_dir,
+                num_steps=self.continual_config["num_steps"],
+                classes_per_step=self.continual_config["classes_per_step"],
+                transform=self.train_transform,
+                test_transform=self.test_transform,
+                target_transform=None,
+                download=True,
+                seed=self.config["seed"],
+            )
+        elif dataset_name == "caltech256":
+            self.dataset = Caltech256CL(
+                root=self.data_dir,
+                num_steps=self.continual_config["num_steps"],
+                classes_per_step=self.continual_config["classes_per_step"],
+                transform=self.train_transform,
+                test_transform=self.test_transform,
+                target_transform=None,
+                download=True,
+                seed=self.config["seed"],
+                train_ratio=self.dataset_config.get("train_ratio", 0.8),
+            )
+        elif dataset_name == "stanford_cars":
+            self.dataset = StanfordCarsCL(
                 root=self.data_dir,
                 num_steps=self.continual_config["num_steps"],
                 classes_per_step=self.continual_config["classes_per_step"],
