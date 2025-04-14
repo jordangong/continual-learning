@@ -8,6 +8,7 @@ from src.data.datasets import (
     CIFAR100CL,
     CUB200CL,
     VTABCL,
+    DomainNetCL,
     ImageNetACL,
     ImageNetRCL,
     ObjectNetCL,
@@ -93,6 +94,23 @@ class DataModule:
                 download=True,
                 seed=self.config["seed"],
                 train_ratio=self.dataset_config.get("train_ratio", 0.8),
+            )
+        elif dataset_name == "domainnet":
+            # For DomainNet, we need to determine if it's class-incremental or domain-incremental
+            mode = self.dataset_config.get("mode", "class")
+            domains = self.dataset_config.get("domains", None)
+
+            self.dataset = DomainNetCL(
+                root=self.data_dir,
+                num_steps=self.continual_config["num_steps"],
+                classes_per_step=self.continual_config["classes_per_step"],
+                transform=self.train_transform,
+                test_transform=self.test_transform,
+                target_transform=None,
+                download=True,
+                seed=self.config["seed"],
+                mode=mode,
+                domains=domains,
             )
         elif dataset_name == "objectnet":
             self.dataset = ObjectNetCL(

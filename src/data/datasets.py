@@ -55,7 +55,7 @@ class ContinualDataset:
         self.dataset_test = None
         self.num_classes = None
         self.class_order = None
-        
+
         # Cache for dataset indices by class
         self._class_indices_cache = {}
         self._cache_lock = threading.Lock()
@@ -183,28 +183,36 @@ class ContinualDataset:
         end_idx = min((step + 1) * self.classes_per_step, self.num_classes)
         return self.class_order[start_idx:end_idx]
 
-    def _initialize_class_indices_cache(self, dataset: Dataset, num_workers: int = 4) -> None:
+    def _initialize_class_indices_cache(
+        self, dataset: Dataset, num_workers: int = 4
+    ) -> None:
         """Initialize the class indices cache for a dataset using multithreading.
-        
+
         Args:
             dataset: The dataset to scan
             num_workers: Number of threads to use for scanning
         """
         dataset_id = id(dataset)
-        if dataset_id in self._cache_initialized and self._cache_initialized[dataset_id]:
+        if (
+            dataset_id in self._cache_initialized
+            and self._cache_initialized[dataset_id]
+        ):
             return
-        
+
         with self._cache_lock:
             # Check again in case another thread initialized the cache while we were waiting
-            if dataset_id in self._cache_initialized and self._cache_initialized[dataset_id]:
+            if (
+                dataset_id in self._cache_initialized
+                and self._cache_initialized[dataset_id]
+            ):
                 return
-                
+
             print(f"Initializing class indices cache for dataset {dataset_id}...")
-            
+
             # Create a defaultdict to store indices by class
             class_indices = defaultdict(list)
             dataset_size = len(dataset)
-            
+
             # Function to process a chunk of the dataset
             def process_chunk(start_idx, end_idx):
                 chunk_indices = defaultdict(list)
@@ -212,50 +220,58 @@ class ContinualDataset:
                     _, target = dataset[i]
                     chunk_indices[target].append(i)
                 return chunk_indices
-            
+
             # Split the dataset into chunks for parallel processing
             chunk_size = max(1, dataset_size // num_workers)
-            chunks = [(i, min(i + chunk_size, dataset_size)) for i in range(0, dataset_size, chunk_size)]
-            
+            chunks = [
+                (i, min(i + chunk_size, dataset_size))
+                for i in range(0, dataset_size, chunk_size)
+            ]
+
             # Process chunks in parallel
             with ThreadPoolExecutor(max_workers=num_workers) as executor:
                 chunk_results = list(executor.map(lambda x: process_chunk(*x), chunks))
-            
+
             # Merge results from all chunks
             for chunk_result in chunk_results:
                 for target, indices in chunk_result.items():
                     class_indices[target].extend(indices)
-            
+
             # Store the cache
             self._class_indices_cache[dataset_id] = dict(class_indices)
             self._cache_initialized[dataset_id] = True
-            print(f"Class indices cache initialized for dataset {dataset_id} with {len(class_indices)} classes")
+            print(
+                f"Class indices cache initialized for dataset {dataset_id} with {len(class_indices)} classes"
+            )
 
     def _get_indices_for_classes(
         self, dataset: Dataset, classes: List[int]
     ) -> List[int]:
         """Get indices of samples belonging to specified classes.
-        
+
         Uses a cached mapping of classes to indices for efficiency with large datasets.
         The cache is initialized on the first call using multithreading.
         """
         dataset_id = id(dataset)
-        
+
         # Initialize cache if not already done
-        if not hasattr(self, '_class_indices_cache'):
+        if not hasattr(self, "_class_indices_cache"):
             self._class_indices_cache = {}
             self._cache_lock = threading.Lock()
             self._cache_initialized = {}
-            
-        if dataset_id not in self._cache_initialized or not self._cache_initialized[dataset_id]:
+
+        if (
+            dataset_id not in self._cache_initialized
+            or not self._cache_initialized[dataset_id]
+        ):
             self._initialize_class_indices_cache(dataset)
-        
+
         # Get indices from cache
         indices = []
         for cls in classes:
             if cls in self._class_indices_cache[dataset_id]:
                 indices.extend(self._class_indices_cache[dataset_id][cls])
-        
+
         return indices
 
     def get_memory_samples(self, step: int, memory_size: int) -> Optional[Dataset]:
@@ -629,6 +645,253 @@ class ImageNetACL(ContinualDataset):
         # Create train and test datasets
         self.dataset_train = Subset(train_dataset, train_indices)
         self.dataset_test = Subset(test_dataset, test_indices)
+
+
+class DomainNetCL(ContinualDataset):
+    """DomainNet dataset for continual learning.
+
+    Supports both class-incremental and domain-incremental learning.
+
+    DomainNet has 6 domains:
+    - clipart: Clipart images
+    - infograph: Infographic images
+    - painting: Painting images
+    - quickdraw: Hand-drawn sketches
+    - real: Real-world images (photos)
+    - sketch: Sketch images
+
+    For class-incremental learning, we use all domains but split classes.
+    For domain-incremental learning, we use all classes but split domains.
+    """
+
+    def __init__(
+        self,
+        root: str,
+        num_steps: int,
+        classes_per_step: int,
+        transform: Optional[Callable] = None,
+        test_transform: Optional[Callable] = None,
+        target_transform: Optional[Callable] = None,
+        download: bool = True,
+        seed: int = 42,
+        class_order: Optional[List[int]] = None,
+        mode: str = "class",  # "class" or "domain"
+        domains: Optional[List[str]] = None,
+    ):
+        """
+        Args:
+            root: Root directory for dataset
+            num_steps: Number of continual learning steps
+            classes_per_step: Number of classes per step (for class-incremental)
+                              or number of domains per step (for domain-incremental)
+            transform: Transform to apply to training data
+            test_transform: Transform to apply to test data (if None, uses transform)
+            target_transform: Transform to apply to targets
+            download: Whether to download the dataset (not implemented)
+            seed: Random seed for reproducibility
+            class_order: Specific order of classes (if None, random order is used)
+            mode: Learning mode, either "class" for class-incremental or "domain" for domain-incremental
+            domains: List of domains to use (if None, uses all domains)
+        """
+        super().__init__(
+            root=root,
+            num_steps=num_steps,
+            classes_per_step=classes_per_step,
+            transform=transform,
+            test_transform=test_transform,
+            target_transform=target_transform,
+            download=download,
+            seed=seed,
+        )
+
+        # Available domains in DomainNet
+        self.available_domains = [
+            "clipart",
+            "infograph",
+            "painting",
+            "quickdraw",
+            "real",
+            "sketch",
+        ]
+
+        # Validate and set domains to use
+        if domains is None:
+            self.domains = self.available_domains
+        else:
+            for domain in domains:
+                if domain not in self.available_domains:
+                    raise ValueError(
+                        f"Invalid domain: {domain}. Available domains: {self.available_domains}"
+                    )
+            self.domains = domains
+
+        # Set mode (class-incremental or domain-incremental)
+        if mode not in ["class", "domain"]:
+            raise ValueError(f"Invalid mode: {mode}. Must be 'class' or 'domain'")
+        self.mode = mode
+
+        # For domain-incremental learning, ensure num_steps is valid
+        if self.mode == "domain":
+            if num_steps > len(self.domains):
+                raise ValueError(
+                    f"For domain-incremental learning, num_steps ({num_steps}) cannot exceed the number of domains ({len(self.domains)})"
+                )
+
+        # DomainNet has 345 classes
+        self.num_classes = 345 if self.mode == "class" else len(self.domains)
+
+        # Set class order (either provided or random)
+        if class_order is None:
+            self.class_order = list(range(self.num_classes))
+            np.random.shuffle(self.class_order)
+        else:
+            assert len(class_order) == self.num_classes, (
+                f"Class order must contain all {self.num_classes} classes"
+            )
+            self.class_order = class_order
+
+        # For domain-incremental learning, create domain order
+        if self.mode == "domain":
+            domain_indices = list(range(len(self.domains)))
+            np.random.shuffle(domain_indices)
+            self.domain_order = [self.domains[i] for i in domain_indices]
+
+        self.setup()
+
+    def setup(self):
+        """Setup DomainNet dataset."""
+        # Check if dataset exists
+        dataset_path = os.path.join(self.root, "domainnet")
+        if not os.path.exists(dataset_path):
+            raise ValueError(
+                f"DomainNet dataset not found at {dataset_path}. "
+                "Please download the dataset manually."
+            )
+
+        # For class-incremental learning, we load all domains
+        if self.mode == "class":
+            self._setup_class_incremental(dataset_path)
+        # For domain-incremental learning, we load all classes but split domains
+        else:
+            self._setup_domain_incremental(dataset_path)
+
+    def _setup_class_incremental(self, dataset_path):
+        """Setup for class-incremental learning (all domains, split classes)."""
+        train_images, train_targets = [], []
+        test_images, test_targets = [], []
+
+        # Load data from all domains
+        for domain in self.domains:
+            domain_train_images, domain_train_targets = self._load_domain_data(
+                dataset_path, domain, "train"
+            )
+            domain_test_images, domain_test_targets = self._load_domain_data(
+                dataset_path, domain, "test"
+            )
+
+            train_images.extend(domain_train_images)
+            train_targets.extend(domain_train_targets)
+            test_images.extend(domain_test_images)
+            test_targets.extend(domain_test_targets)
+
+        # Create datasets
+        self.dataset_train = ImageListDataset(
+            train_images, train_targets, transform=self.transform
+        )
+        self.dataset_test = ImageListDataset(
+            test_images, test_targets, transform=self.test_transform
+        )
+
+    def _setup_domain_incremental(self, dataset_path):
+        """Setup for domain-incremental learning (all classes, split domains)."""
+        # For domain-incremental learning, we create a separate dataset for each domain
+        # and relabel classes to be domain IDs
+
+        train_images, train_targets = [], []
+        test_images, test_targets = [], []
+
+        # Load data from all domains, but relabel targets to be domain IDs
+        for domain_idx, domain in enumerate(self.domains):
+            domain_train_images, _ = self._load_domain_data(
+                dataset_path, domain, "train"
+            )
+            domain_test_images, _ = self._load_domain_data(dataset_path, domain, "test")
+
+            # Assign domain index as the target
+            domain_train_targets = [domain_idx] * len(domain_train_images)
+            domain_test_targets = [domain_idx] * len(domain_test_images)
+
+            train_images.extend(domain_train_images)
+            train_targets.extend(domain_train_targets)
+            test_images.extend(domain_test_images)
+            test_targets.extend(domain_test_targets)
+
+        # Create datasets
+        self.dataset_train = ImageListDataset(
+            train_images, train_targets, transform=self.transform
+        )
+        self.dataset_test = ImageListDataset(
+            test_images, test_targets, transform=self.test_transform
+        )
+
+    def _load_domain_data(self, dataset_path, domain, split):
+        """Load data for a specific domain and split.
+
+        Args:
+            dataset_path: Path to the DomainNet dataset
+            domain: Domain name
+            split: Either "train" or "test"
+
+        Returns:
+            Tuple of (images, targets)
+        """
+        split_file = os.path.join(dataset_path, f"{domain}_{split}.txt")
+
+        if not os.path.exists(split_file):
+            raise ValueError(f"Split file not found: {split_file}")
+
+        images, targets = [], []
+
+        with open(split_file, "r") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+
+                parts = line.split()
+                if len(parts) != 2:
+                    continue
+
+                image_path, target = parts
+                image_path = os.path.join(dataset_path, image_path)
+                target = int(target)
+
+                # Skip if image doesn't exist
+                if not os.path.exists(image_path):
+                    continue
+
+                images.append(image_path)
+                targets.append(target)
+
+        return images, targets
+
+    def _get_step_classes(self, step):
+        """Get classes for a specific step.
+
+        For class-incremental learning, returns a subset of classes.
+        For domain-incremental learning, returns domains for the step.
+        """
+        if self.mode == "class":
+            # Class-incremental: return subset of classes
+            start_idx = step * self.classes_per_step
+            end_idx = min((step + 1) * self.classes_per_step, self.num_classes)
+            return [self.class_order[i] for i in range(start_idx, end_idx)]
+        else:
+            # Domain-incremental: return domains for this step
+            start_idx = step * self.classes_per_step
+            end_idx = min((step + 1) * self.classes_per_step, len(self.domains))
+            domain_indices = [self.class_order[i] for i in range(start_idx, end_idx)]
+            return domain_indices
 
 
 class ObjectNetCL(ContinualDataset):
