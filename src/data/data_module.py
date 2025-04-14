@@ -12,6 +12,7 @@ from src.data.datasets import (
     ImageNetACL,
     ImageNetRCL,
     ObjectNetCL,
+    ObjectNet200CL,
     OmniBenchCL,
 )
 from src.data.transforms import get_transforms
@@ -123,6 +124,17 @@ class DataModule:
                 download=True,
                 seed=self.config["seed"],
                 train_ratio=self.dataset_config.get("train_ratio", 0.8),
+            )
+        elif dataset_name == "objectnet200":
+            self.dataset = ObjectNet200CL(
+                root=self.data_dir,
+                num_steps=self.continual_config["num_steps"],
+                classes_per_step=self.continual_config["classes_per_step"],
+                transform=self.train_transform,
+                test_transform=self.test_transform,
+                target_transform=None,
+                download=True,
+                seed=self.config["seed"],
             )
         elif dataset_name == "omnibench":
             self.dataset = OmniBenchCL(

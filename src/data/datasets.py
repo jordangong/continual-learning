@@ -999,6 +999,127 @@ class ObjectNetCL(ContinualDataset):
         )
 
 
+class ObjectNet200CL(ContinualDataset):
+    """ObjectNet-200 dataset for continual learning.
+
+    This class implements a subset of ObjectNet with 200 classes, using provided split files.
+    """
+
+    def __init__(
+        self,
+        root: str,
+        num_steps: int,
+        classes_per_step: int,
+        transform: Optional[Callable] = None,
+        test_transform: Optional[Callable] = None,
+        target_transform: Optional[Callable] = None,
+        download: bool = True,
+        seed: int = 42,
+        class_order: Optional[List[int]] = None,
+    ):
+        super().__init__(
+            root=root,
+            num_steps=num_steps,
+            classes_per_step=classes_per_step,
+            transform=transform,
+            test_transform=test_transform,
+            target_transform=target_transform,
+            download=download,
+            seed=seed,
+        )
+
+        # ObjectNet-200 has 200 classes
+        self.num_classes = 200
+
+        # Set class order (either provided or random)
+        if class_order is None:
+            self.class_order = list(range(self.num_classes))
+            np.random.shuffle(self.class_order)
+        else:
+            assert len(class_order) == self.num_classes, (
+                "Class order must contain all classes"
+            )
+            self.class_order = class_order
+
+        self.setup()
+
+    def setup(self):
+        """Setup ObjectNet-200 dataset using the provided split files."""
+        # Check if dataset exists
+        dataset_path = os.path.join(self.root, "objectnet-1.0")
+        if not os.path.exists(dataset_path) and self.download:
+            raise ValueError(
+                "ObjectNet dataset must be downloaded manually. "
+                "Please download from https://objectnet.dev/ "
+                "and extract to {}".format(dataset_path)
+            )
+
+        # Check if split files exist
+        split_dir = os.path.join(self.root, "objectnet-200")
+        train_split_file = os.path.join(split_dir, "train.txt")
+        test_split_file = os.path.join(split_dir, "test.txt")
+
+        if not os.path.exists(train_split_file) or not os.path.exists(test_split_file):
+            raise ValueError(
+                "ObjectNet-200 split files not found. "
+                "Please ensure the files are in {}".format(split_dir)
+            )
+
+        # Load train and test splits
+        train_images, train_targets = self._load_split_data(
+            train_split_file, dataset_path
+        )
+        test_images, test_targets = self._load_split_data(test_split_file, dataset_path)
+
+        # Create custom datasets with remove_border=True to remove the 1-pixel red border
+        self.dataset_train = ImageListDataset(
+            train_images, train_targets, transform=self.transform, remove_border=True
+        )
+        self.dataset_test = ImageListDataset(
+            test_images, test_targets, transform=self.test_transform, remove_border=True
+        )
+
+    def _load_split_data(self, split_file, dataset_path):
+        """Load data from a split file.
+
+        Args:
+            split_file: Path to the split file
+            dataset_path: Path to the ObjectNet dataset
+
+        Returns:
+            Tuple of (images, targets)
+        """
+        # Read split file
+        with open(split_file, "r") as f:
+            lines = f.read().strip().split("\n")
+
+        # Create a mapping from folder names to class indices
+        folders = sorted(list(set([line.split("/")[2] for line in lines])))
+        folder_to_idx = {folder: idx for idx, folder in enumerate(folders)}
+
+        # Process each line in the split file
+        images = []
+        targets = []
+
+        for line in lines:
+            # Split the path components
+            parts = line.split("/")
+            folder = parts[2]  # Class folder name
+            filename = parts[3]  # Image filename
+
+            # In split files, paths are like ./train/mouse_pad/filename.png
+            # In the original dataset, paths are like data/objectnet-1.0/images/mouse_pad/filename.png
+            img_path = os.path.join(dataset_path, "images", folder, filename)
+
+            if os.path.exists(img_path):
+                images.append(img_path)
+                targets.append(folder_to_idx[folder])
+            else:
+                print(f"Warning: Image not found: {img_path}")
+
+        return images, targets
+
+
 class OmniBenchCL(ContinualDataset):
     """OmniBench dataset for continual learning.
 
