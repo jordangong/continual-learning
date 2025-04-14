@@ -159,8 +159,48 @@ def run_training(
             # This ensures we maintain prototypes for previous classes
             reset_prototypes = step == 0
 
-            # Initialize prototypes from training data
-            model_to_use.init_prototypes_from_data(train_loader, reset=reset_prototypes)
+            # Initialize prototypes from training data but with test transforms
+            # Create a temporary data loader with test transforms for prototype initialization
+            # This ensures consistent feature extraction without augmentations
+            if hasattr(train_loader.dataset, "dataset"):
+                # Handle nested datasets (e.g., Subsets)
+                temp_dataset = train_loader.dataset.dataset
+            elif hasattr(train_loader.dataset, "datasets"):
+                # Handle concatenated datasets
+                temp_dataset = train_loader.dataset.datasets
+            else:
+                temp_dataset = train_loader.dataset
+
+            # Store original transform and temporarily replace with test transform
+            original_transforms = []
+            # Handle both single dataset and list of datasets
+            if not isinstance(temp_dataset, list):
+                temp_dataset = [temp_dataset]
+            for dataset in temp_dataset:
+                if hasattr(dataset, "transform"):
+                    original_transforms.append(dataset.transform)
+                    dataset.transform = data_module.test_transform
+
+            # Create a temporary data loader with evaluation batch size for faster processing
+            temp_loader = torch.utils.data.DataLoader(
+                train_loader.dataset,
+                batch_size=test_loader.batch_size,  # Use larger eval batch size
+                shuffle=False,  # No need to shuffle for prototype extraction
+                num_workers=train_loader.num_workers,
+                pin_memory=train_loader.pin_memory,
+            )
+
+            # Initialize prototypes using the temporary loader with test transforms
+            model_to_use.init_prototypes_from_data(temp_loader, reset=reset_prototypes)
+
+            # Restore original transform
+            if original_transforms:
+                # Handle both single dataset and list of datasets
+                if not isinstance(temp_dataset, list):
+                    temp_dataset = [temp_dataset]
+                for dataset, original in zip(temp_dataset, original_transforms):
+                    if hasattr(dataset, "transform"):
+                        dataset.transform = original
 
         # Train or evaluate on current step
         start_time = time.time()
