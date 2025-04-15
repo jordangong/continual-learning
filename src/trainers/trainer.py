@@ -192,27 +192,56 @@ class ContinualTrainer:
         """Setup optimizer based on configuration."""
         optimizer_config = self.config["optimizer"]
         optimizer_name = optimizer_config["name"].lower()
+        lr = optimizer_config["lr"]
+        weight_decay = optimizer_config["weight_decay"]
+
+        # Get the correct model reference (module if distributed)
+        model_to_use = self.model.module if self.distributed else self.model
+
+        # Get backbone learning rate multiplier from optimizer config
+        backbone_lr_multiplier = optimizer_config.get("backbone_lr_multiplier", 1.0)
+
+        # Create parameter groups with different learning rates if multiplier is not 1.0
+        if backbone_lr_multiplier != 1.0:
+            backbone_params = []
+            other_params = []
+
+            # Separate backbone parameters from other parameters
+            for name, param in model_to_use.named_parameters():
+                if "backbone" in name:
+                    backbone_params.append(param)
+                else:
+                    other_params.append(param)
+
+            # Create parameter groups with different learning rates
+            param_groups = [
+                {"params": backbone_params, "lr": lr * backbone_lr_multiplier},
+                {"params": other_params},
+            ]
+        else:
+            # Use all parameters with the same learning rate
+            param_groups = model_to_use.parameters()
 
         if optimizer_name == "adam":
             return optim.Adam(
-                self.model.parameters(),
-                lr=optimizer_config["lr"],
-                weight_decay=optimizer_config["weight_decay"],
+                param_groups,
+                lr=lr,
+                weight_decay=weight_decay,
                 betas=optimizer_config.get("betas", (0.9, 0.999)),
             )
         elif optimizer_name == "sgd":
             return optim.SGD(
-                self.model.parameters(),
-                lr=optimizer_config["lr"],
+                param_groups,
+                lr=lr,
                 momentum=optimizer_config.get("momentum", 0.9),
-                weight_decay=optimizer_config["weight_decay"],
+                weight_decay=weight_decay,
                 nesterov=optimizer_config.get("nesterov", False),
             )
         elif optimizer_name == "adamw":
             return optim.AdamW(
-                self.model.parameters(),
-                lr=optimizer_config["lr"],
-                weight_decay=optimizer_config["weight_decay"],
+                param_groups,
+                lr=lr,
+                weight_decay=weight_decay,
                 betas=optimizer_config.get("betas", (0.9, 0.999)),
             )
         else:
@@ -263,7 +292,8 @@ class ContinualTrainer:
             # If warmup is enabled, use a sequential scheduler
             if warmup_epochs > 0:
                 # Get initial learning rate from optimizer
-                initial_lr = self.optimizer.param_groups[0]["lr"]
+                # Use last group, in case of multiplied backbone learning rate in the first group
+                initial_lr = self.optimizer.param_groups[-1]["lr"]
 
                 # Create linear warmup scheduler
                 warmup_scheduler = optim.lr_scheduler.LinearLR(
@@ -627,10 +657,14 @@ class ContinualTrainer:
                 # Add more detailed info in verbose debug mode
                 if debug_verbose:
                     batch_size = inputs.size(0)
+                    lr_stats = {
+                        f"lr_{i}": param_group["lr"]
+                        for i, param_group in enumerate(self.optimizer.param_groups)
+                    }
                     postfix.update(
                         {
                             "batch_size": batch_size,
-                            "lr": self.optimizer.param_groups[0]["lr"],
+                            **lr_stats,
                             "step": step,
                             "epoch": epoch + 1,
                         }
@@ -777,18 +811,24 @@ class ContinualTrainer:
                 self.writer.add_scalar(f"step_{step}/test_acc", test_acc, global_epoch)
 
             # Log learning rate
-            lr = self.optimizer.param_groups[0]["lr"]
-            self.writer.add_scalar("global/learning_rate", lr, global_epoch)
+            for i, param_group in enumerate(self.optimizer.param_groups):
+                self.writer.add_scalar(
+                    f"global/learning_rate_{i}", param_group["lr"], global_epoch
+                )
             self.writer.add_scalar("global/step", step, global_epoch)
             self.writer.add_scalar("global/epoch", epoch, global_epoch)
 
         # Log to Weights & Biases
         if self.logging_config["wandb"]:
+            lr_data = {
+                f"global/learning_rate_{i}": param_group["lr"]
+                for i, param_group in enumerate(self.optimizer.param_groups)
+            }
             log_data = {
                 "global/train_loss": train_loss,
                 f"step_{step}/train_loss": train_loss,
                 f"step_{step}/train_acc": train_acc,
-                "global/learning_rate": self.optimizer.param_groups[0]["lr"],
+                **lr_data,
                 "global/step": step,
                 "global/epoch": epoch,
             }
