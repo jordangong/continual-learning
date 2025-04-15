@@ -39,6 +39,7 @@ continual:
   memory_size: 2000            # Size of memory buffer for rehearsal (if used)
   strategy: "finetune"         # Options: finetune, ewc, replay, zeroshot etc.
   mask_logits: true            # Enable logit masking for non-current task classes, except replay samples
+  entropy_prediction: false    # Enable entropy-based logit selection before prediction
 
 # Training hyperparameters
 training:

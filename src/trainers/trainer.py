@@ -55,6 +55,9 @@ class ContinualTrainer:
         # Class logit masking configuration
         self.mask_logits = self.continual_config.get("mask_logits", False)
 
+        # Entropy prediction configuration
+        self.entropy_prediction = self.continual_config.get("entropy_prediction", False)
+
         # Class tracking for logit masking
         self.current_task_classes = None  # Classes in current step
 
@@ -602,7 +605,10 @@ class ContinualTrainer:
 
             # Update metrics
             total_loss += loss.item()
-            _, predicted = outputs.max(1)
+            if self.entropy_prediction:
+                predicted = self._entropy_based_prediction(outputs)
+            else:
+                _, predicted = outputs.max(1)
             total += targets.size(0)
             correct += predicted.eq(targets).sum().item()
 
@@ -697,7 +703,10 @@ class ContinualTrainer:
 
                 # Update metrics
                 total_loss += loss.item() * inputs.size(0)
-                _, predicted = outputs.max(1)
+                if self.entropy_prediction:
+                    predicted = self._entropy_based_prediction(outputs)
+                else:
+                    _, predicted = outputs.max(1)
                 total += targets.size(0)
                 correct += predicted.eq(targets).sum().item()
 
@@ -969,6 +978,76 @@ class ContinualTrainer:
 
         # Store EWC data
         self.ewc_data = {"fisher": fisher, "params": params}
+
+    def _entropy_based_prediction(self, outputs: torch.Tensor) -> torch.Tensor:
+        """
+        Make predictions based on entropy of class probabilities
+
+        Instead of simply taking the max logit, this method:
+        1. Calculates class probabilities for each step
+        2. Computes entropy for each step's probability distribution
+        3. Selects the step with lowest entropy (highest confidence)
+        4. Returns the class with highest probability from that step
+
+        Args:
+            outputs: Model output logits [batch_size, num_classes]
+
+        Returns:
+            Predicted class indices [batch_size]
+        """
+        batch_size = outputs.size(0)
+        num_classes = outputs.size(1)
+        num_steps = self.continual_config["num_steps"]
+        classes_per_step = self.continual_config["classes_per_step"]
+
+        # Handle case where num_classes is not divisible by classes_per_step
+        # by padding the outputs tensor to make it divisible
+        if num_classes % classes_per_step != 0:
+            # Calculate padding needed
+            padding_size = classes_per_step - (num_classes % classes_per_step)
+            # Pad with negative infinity to ensure they don't affect softmax
+            padding = torch.full(
+                (batch_size, padding_size), -torch.inf, device=outputs.device
+            )
+            # Pad the outputs tensor
+            padded_outputs = torch.cat([outputs, padding], dim=1)
+        else:
+            padded_outputs = outputs
+
+        # Reshape the outputs to [batch_size, num_steps, classes_per_step]
+        # This creates a 3D tensor where each slice along dim=1 represents a step's logits
+        reshaped_outputs = padded_outputs.view(batch_size, num_steps, classes_per_step)
+
+        # Calculate softmax probabilities for each step (along classes_per_step dimension)
+        step_probs = reshaped_outputs.softmax(dim=2)
+        # [batch_size, num_steps, classes_per_step]
+
+        # Calculate entropy for each step: -sum(p * log(p))
+        # Add small epsilon to avoid log(0)
+        log_probs = torch.log(step_probs + 1e-10)
+        entropies = -torch.sum(step_probs * log_probs, dim=2)  # [batch_size, num_steps]
+
+        # Find step with minimum entropy (maximum confidence) for each sample
+        min_entropy_steps = entropies.argmin(dim=1)  # [batch_size]
+
+        # Create a mask to select the logits from the step with minimum entropy for each sample
+        # First create indices for the batch dimension
+        batch_indices = torch.arange(batch_size, device=outputs.device)
+
+        # Select the logits from the minimum entropy step for each sample
+        # This gives us [batch_size, classes_per_step]
+        selected_step_logits = reshaped_outputs[batch_indices, min_entropy_steps]
+
+        # Find the class with maximum probability within the selected step
+        max_class_indices = selected_step_logits.argmax(dim=1)  # [batch_size]
+
+        # Convert to the actual class indices in the original output space
+        predictions = min_entropy_steps * classes_per_step + max_class_indices
+
+        # Ensure predictions don't exceed the original number of classes
+        predictions = torch.clamp(predictions, max=num_classes - 1)
+
+        return predictions
 
     def _apply_logit_masking(
         self,

@@ -3,23 +3,6 @@ from typing import List
 import numpy as np
 
 
-def accuracy(outputs, targets):
-    """
-    Compute accuracy.
-
-    Args:
-        outputs: Model outputs
-        targets: Ground truth targets
-
-    Returns:
-        Accuracy
-    """
-    _, predicted = outputs.max(1)
-    correct = predicted.eq(targets).sum().item()
-    total = targets.size(0)
-    return 100.0 * correct / total
-
-
 def forgetting(accuracies: List[float], current_step: int) -> float:
     """
     Compute forgetting measure.
@@ -39,11 +22,3 @@ def forgetting(accuracies: List[float], current_step: int) -> float:
     return np.mean(
         [max(0, accuracies[i] - accuracies[current_step]) for i in range(current_step)]
     )
-
-
-# Note: The following metrics functions were removed as they were unused in the codebase:
-# - backward_transfer: Computes the difference between current accuracy on previous tasks and original accuracy
-# - forward_transfer: Computes the difference between accuracy on future tasks and random baseline
-# - average_accuracy: Computes the mean accuracy across all steps
-#
-# If these metrics are needed in the future, they can be reimplemented based on the forgetting measure pattern.
