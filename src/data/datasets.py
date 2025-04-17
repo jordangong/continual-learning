@@ -1585,6 +1585,210 @@ class OmniBenchCL(ContinualDataset):
         return train_images, train_targets, test_images, test_targets
 
 
+class OmniBench300CL(ContinualDataset):
+    """OmniBench 300-class subset for continual learning.
+
+    This class implements a subset of OmniBenchmark with 300 classes,
+    using provided split files in data/omnibenchmark-300.
+    """
+
+    def __init__(
+        self,
+        root: str,
+        num_steps: int,
+        classes_per_step: int,
+        transform: Optional[Callable] = None,
+        test_transform: Optional[Callable] = None,
+        target_transform: Optional[Callable] = None,
+        download: bool = True,
+        seed: int = 42,
+        class_order: Optional[List[int]] = None,
+    ):
+        super().__init__(
+            root=root,
+            num_steps=num_steps,
+            classes_per_step=classes_per_step,
+            transform=transform,
+            test_transform=test_transform,
+            target_transform=target_transform,
+            download=download,
+            seed=seed,
+        )
+
+        self.dataset_path = os.path.join(self.root, "omnibenchmark_v2")
+        self.split_path = os.path.join(self.root, "omnibenchmark-300")
+
+        # Set number of classes
+        self.num_classes = 300
+
+        # Set random seed for reproducibility
+        np.random.seed(seed)
+
+        # Check if dataset exists
+        if not os.path.exists(self.dataset_path) and self.download:
+            raise ValueError(
+                f"OmniBenchmark dataset must be downloaded manually. "
+                f"Please download from https://github.com/ZhangYuanhan-AI/OmniBenchmark "
+                f"and extract to {self.dataset_path}"
+            )
+
+        # Check if split files exist
+        if not os.path.exists(self.split_path):
+            raise ValueError(
+                f"OmniBench 300-class split files not found at {self.split_path}. "
+                f"Please ensure the split files are placed in the correct location."
+            )
+
+        # Set class order (either provided or random)
+        if class_order is None:
+            self.class_order = list(range(self.num_classes))
+            np.random.shuffle(self.class_order)
+        else:
+            assert len(class_order) == self.num_classes, (
+                "Class order must contain all classes"
+            )
+            self.class_order = class_order
+
+        self.setup()
+
+    def _build_image_lookup_table(self):
+        """Build a single lookup table mapping image filenames to their categories.
+
+        Includes images from all splits (train, val, test) in the original dataset.
+        """
+        print("Building image lookup table...")
+        image_to_category = {}
+
+        # Read all meta files once and build lookup table
+        for category in os.listdir(os.path.join(self.dataset_path, "annotation")):
+            # Process all split files (train, val, test)
+            for split in ["train", "val", "test"]:
+                meta_file = os.path.join(
+                    self.dataset_path, "annotation", category, "meta", f"{split}.txt"
+                )
+                if os.path.exists(meta_file):
+                    with open(meta_file, "r") as f:
+                        for line in f:
+                            parts = line.strip().split()
+                            if len(parts) >= 2:
+                                img_filename = parts[0]
+                                image_to_category[img_filename] = category
+
+        print(f"Built lookup table with {len(image_to_category)} total images")
+        return image_to_category
+
+    def _collect_unique_class_ids(self):
+        """Collect all unique class IDs from the split files and create a mapping."""
+        unique_class_ids = set()
+
+        # Process both train and test split files
+        for split in ["train", "test"]:
+            split_file = os.path.join(self.split_path, f"{split}.txt")
+            if os.path.exists(split_file):
+                with open(split_file, "r") as f:
+                    for line in f:
+                        line = line.strip()
+                        if line:
+                            parts = line.split("/")
+                            if len(parts) >= 3:
+                                class_id = int(parts[2])
+                                unique_class_ids.add(class_id)
+
+        # Create a mapping from original class IDs to sequential IDs starting from 0
+        class_id_mapping = {
+            original_id: idx for idx, original_id in enumerate(sorted(unique_class_ids))
+        }
+        print(
+            f"Remapped {len(class_id_mapping)} unique class IDs to sequential IDs starting from 0"
+        )
+        return class_id_mapping
+
+    def _process_split_file(self, split, image_to_category, class_id_mapping):
+        """Process a split file and return images and targets.
+
+        Args:
+            split: The split name ('train' or 'test')
+            image_to_category: Lookup table mapping image filenames to categories
+            class_id_mapping: Mapping from original class IDs to sequential IDs
+
+        Returns:
+            images: List of image paths
+            targets: List of class labels
+        """
+        images = []
+        targets = []
+        split_file = os.path.join(self.split_path, f"{split}.txt")
+
+        if os.path.exists(split_file):
+            with open(split_file, "r") as f:
+                for line in f:
+                    line = line.strip()
+                    if line:
+                        # Parse the line from the split file
+                        # Format: ./train/54/5219044416_f1f7bdeec6_c.jpg or ./test/54/5219044416_f1f7bdeec6_c.jpg
+                        parts = line.split("/")
+                        if len(parts) >= 3:
+                            original_class_id = int(
+                                parts[2]
+                            )  # Extract original class ID (e.g., 54)
+                            remapped_class_id = class_id_mapping[
+                                original_class_id
+                            ]  # Remap to sequential ID
+                            img_filename = parts[3]  # Extract image filename
+
+                            # Use the lookup table to find the category
+                            if img_filename in image_to_category:
+                                category = image_to_category[img_filename]
+                                img_path = os.path.join(
+                                    self.dataset_path,
+                                    "data",
+                                    category,
+                                    "images",
+                                    img_filename,
+                                )
+                                if os.path.exists(img_path):
+                                    images.append(img_path)
+                                    targets.append(remapped_class_id)
+                                else:
+                                    print(
+                                        f"Warning: {split.capitalize()} image file not found: {img_path}"
+                                    )
+                            else:
+                                print(
+                                    f"Warning: {split.capitalize()} image {img_filename} not found in meta files"
+                                )
+
+        return images, targets
+
+    def setup(self):
+        """Setup OmniBench 300-class subset dataset."""
+        # Build a single lookup table for all image filenames to categories
+        image_to_category = self._build_image_lookup_table()
+
+        # Collect unique class IDs and create mapping
+        class_id_mapping = self._collect_unique_class_ids()
+
+        # Process train and test split files
+        train_images, train_targets = self._process_split_file(
+            "train", image_to_category, class_id_mapping
+        )
+        test_images, test_targets = self._process_split_file(
+            "test", image_to_category, class_id_mapping
+        )
+
+        # Create custom datasets
+        self.dataset_train = ImageListDataset(
+            train_images, train_targets, transform=self.transform
+        )
+        self.dataset_test = ImageListDataset(
+            test_images, test_targets, transform=self.test_transform
+        )
+
+        print(
+            f"Loaded OmniBench300 dataset with {len(train_images)} training images and {len(test_images)} test images"
+        )
+
+
 class VTABCL(ContinualDataset):
     """Visual Task Adaptation Benchmark (VTAB) for continual learning."""
 

@@ -14,6 +14,7 @@ from src.data.datasets import (
     ImageNetRCL,
     ObjectNet200CL,
     ObjectNetCL,
+    OmniBench300CL,
     OmniBenchCL,
     StanfordCarsCL,
 )
@@ -173,6 +174,18 @@ class DataModule:
                 seed=self.config["seed"],
                 category=self.dataset_config.get("category", "all"),
                 max_classes=self.dataset_config.get("max_classes", 300),
+            )
+        elif dataset_name == "omnibench300":
+            self.dataset = OmniBench300CL(
+                root=self.data_dir,
+                num_steps=self.continual_config["num_steps"],
+                classes_per_step=self.continual_config["classes_per_step"],
+                transform=self.train_transform,
+                test_transform=self.test_transform,
+                target_transform=None,
+                download=True,
+                seed=self.config["seed"],
+                class_order=None,  # Use random class order by default
             )
         elif dataset_name == "vtab":
             self.dataset = VTABCL(
