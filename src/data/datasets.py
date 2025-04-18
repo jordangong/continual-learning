@@ -4,13 +4,20 @@ import os
 import threading
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
-from typing import Callable, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 
 import numpy as np
 import torch
+import torchvision.datasets as tv_datasets
 from PIL import Image
-from torch.utils.data import DataLoader, Dataset, DistributedSampler, Subset
-from torchvision.datasets import CIFAR100, Caltech256, ImageFolder, StanfordCars
+from torch.utils.data import (
+    ConcatDataset,
+    DataLoader,
+    Dataset,
+    DistributedSampler,
+    Subset,
+)
+from torchvision.datasets import ImageFolder
 
 
 class ContinualDataset:
@@ -361,7 +368,7 @@ class CIFAR100CL(ContinualDataset):
 
     def setup(self):
         """Setup CIFAR-100 dataset."""
-        self.dataset_train = CIFAR100(
+        self.dataset_train = tv_datasets.CIFAR100(
             root=self.root,
             train=True,
             transform=self.transform,
@@ -369,7 +376,7 @@ class CIFAR100CL(ContinualDataset):
             download=self.download,
         )
 
-        self.dataset_test = CIFAR100(
+        self.dataset_test = tv_datasets.CIFAR100(
             root=self.root,
             train=False,
             transform=self.test_transform,
@@ -537,7 +544,7 @@ class Caltech256CL(ContinualDataset):
     def setup(self):
         """Setup Caltech256 dataset excluding the clutter class (class 256)."""
         # Load the dataset
-        dataset = Caltech256(
+        dataset = tv_datasets.Caltech256(
             root=self.root,
             transform=None,  # We'll apply transforms later
             target_transform=self.target_transform,
@@ -623,7 +630,7 @@ class StanfordCarsCL(ContinualDataset):
     def setup(self):
         """Setup Stanford Cars dataset."""
         # Load the train and test datasets
-        self.dataset_train = StanfordCars(
+        self.dataset_train = tv_datasets.StanfordCars(
             root=self.root,
             split="train",
             transform=self.transform,
@@ -631,7 +638,7 @@ class StanfordCarsCL(ContinualDataset):
             download=self.download,
         )
 
-        self.dataset_test = StanfordCars(
+        self.dataset_test = tv_datasets.StanfordCars(
             root=self.root,
             split="test",
             transform=self.test_transform,
@@ -1839,12 +1846,63 @@ class VTABCL(ContinualDataset):
             "smallnorb_elevation": 9,
             "dsprites_orientation": 16,
             "dsprites_location": 16,
+            # Torchvision datasets
+            "cifar10": 10,
+            "caltech256": 257,
+            "celeba": 40,  # Attributes
+            "country211": 211,
+            "emnist": 62,  # Letters and digits
+            "fashionmnist": 10,
+            "fer2013": 7,
+            "food101": 101,
+            "gtsrb": 43,
+            "imagenet": 1000,
+            "kmnist": 10,
+            "lfw": 5749,  # People
+            "mnist": 10,
+            "omniglot": 1623,
+            "places365": 365,
+            "qmnist": 10,
+            "rendered_sst2": 2,
+            "stanfordcars": 196,
+            "stl10": 10,
+            "usps": 10,
         }
 
         if self.task not in task_classes:
             raise ValueError(f"Unsupported VTAB task: {self.task}")
 
         self.num_classes = task_classes[self.task]
+        self.is_torchvision_dataset = self.task in [
+            "cifar10",
+            "cifar100",
+            "caltech101",
+            "caltech256",
+            "celeba",
+            "country211",
+            "dtd",
+            "emnist",
+            "eurosat",
+            "fashionmnist",
+            "fer2013",
+            "food101",
+            "gtsrb",
+            "imagenet",
+            "kmnist",
+            "lfw",
+            "mnist",
+            "omniglot",
+            "oxford_flowers102",
+            "oxford_iiit_pet",
+            "places365",
+            "qmnist",
+            "rendered_sst2",
+            "stanfordcars",
+            "stl10",
+            "sun397",
+            "svhn",
+            "usps",
+        ]
 
         # Set class order (either provided or random)
         if class_order is None:
@@ -1860,8 +1918,191 @@ class VTABCL(ContinualDataset):
 
     def setup(self):
         """Setup VTAB dataset."""
+        if self.is_torchvision_dataset:
+            # Use torchvision dataset
+            self._setup_torchvision_dataset()
+        else:
+            # Use custom VTAB dataset
+            self._setup_custom_vtab_dataset()
+
+    def _setup_torchvision_dataset(self):
+        """Setup dataset using torchvision."""
+        # Map task name to torchvision dataset class
+        dataset_mapping = {
+            "cifar10": tv_datasets.CIFAR10,
+            "cifar100": tv_datasets.CIFAR100,
+            "caltech101": tv_datasets.Caltech101,
+            "caltech256": tv_datasets.Caltech256,
+            "celeba": tv_datasets.CelebA,
+            "country211": tv_datasets.Country211,
+            "dtd": tv_datasets.DTD,
+            "emnist": lambda root, train, download, transform: tv_datasets.EMNIST(
+                root,
+                split="byclass",
+                train=train,
+                download=download,
+                transform=transform,
+            ),
+            "eurosat": tv_datasets.EuroSAT,
+            "fashionmnist": tv_datasets.FashionMNIST,
+            "fer2013": tv_datasets.FER2013,
+            "food101": tv_datasets.Food101,
+            "gtsrb": tv_datasets.GTSRB,
+            "imagenet": tv_datasets.ImageNet,
+            "kmnist": tv_datasets.KMNIST,
+            "lfw": lambda root, download, transform: tv_datasets.LFWPeople(
+                root, download=download, transform=transform
+            ),
+            "mnist": tv_datasets.MNIST,
+            "omniglot": tv_datasets.Omniglot,
+            "oxford_flowers102": tv_datasets.Flowers102,
+            "oxford_iiit_pet": tv_datasets.OxfordIIITPet,
+            "places365": tv_datasets.Places365,
+            "qmnist": tv_datasets.QMNIST,
+            "rendered_sst2": tv_datasets.RenderedSST2,
+            "stanfordcars": tv_datasets.StanfordCars,
+            "stl10": tv_datasets.STL10,
+            "sun397": tv_datasets.SUN397,
+            "svhn": tv_datasets.SVHN,
+            "usps": tv_datasets.USPS,
+        }
+
+        dataset_class = dataset_mapping[self.task]
+
+        # Handle datasets with different initialization parameters
+        try:
+            # Standard case: train/test split with transforms
+            if self.task in [
+                "cifar10",
+                "cifar100",
+                "fashionmnist",
+                "kmnist",
+                "mnist",
+                "qmnist",
+                "usps",
+            ]:
+                self.dataset_train = dataset_class(
+                    root=self.root,
+                    train=True,
+                    download=self.download,
+                    transform=self.transform,
+                )
+                self.dataset_test = dataset_class(
+                    root=self.root,
+                    train=False,
+                    download=self.download,
+                    transform=self.test_transform,
+                )
+            # SVHN has 'train' and 'test' splits
+            elif self.task == "svhn":
+                self.dataset_train = dataset_class(
+                    root=self.root,
+                    split="train",
+                    download=self.download,
+                    transform=self.transform,
+                )
+                self.dataset_test = dataset_class(
+                    root=self.root,
+                    split="test",
+                    download=self.download,
+                    transform=self.test_transform,
+                )
+            # STL10 has 'train' and 'test' splits
+            elif self.task == "stl10":
+                self.dataset_train = dataset_class(
+                    root=self.root,
+                    split="train",
+                    download=self.download,
+                    transform=self.transform,
+                )
+                self.dataset_test = dataset_class(
+                    root=self.root,
+                    split="test",
+                    download=self.download,
+                    transform=self.test_transform,
+                )
+            # EMNIST has special handling
+            elif self.task == "emnist":
+                self.dataset_train = dataset_class(
+                    self.root, True, self.download, self.transform
+                )
+                self.dataset_test = dataset_class(
+                    self.root, False, self.download, self.test_transform
+                )
+            # LFW has special handling
+            elif self.task == "lfw":
+                dataset = dataset_class(self.root, self.download, self.transform)
+                # Create train/test split
+                indices = list(range(len(dataset)))
+                np.random.shuffle(indices)
+                split_idx = int(len(indices) * 0.8)  # 80% for training
+                train_indices = indices[:split_idx]
+                test_indices = indices[split_idx:]
+                self.dataset_train = Subset(dataset, train_indices)
+                # Create a new dataset with test transform
+                test_dataset = dataset_class(
+                    self.root, self.download, self.test_transform
+                )
+                self.dataset_test = Subset(test_dataset, test_indices)
+            # Datasets with 'train' and 'test' splits and additional parameters
+            else:
+                # Try standard initialization with split parameter
+                try:
+                    self.dataset_train = dataset_class(
+                        root=self.root,
+                        split="train",
+                        download=self.download,
+                        transform=self.transform,
+                    )
+                    self.dataset_test = dataset_class(
+                        root=self.root,
+                        split="test",
+                        download=self.download,
+                        transform=self.test_transform,
+                    )
+                except (TypeError, ValueError):
+                    # If that fails, try with 'train' boolean parameter
+                    try:
+                        self.dataset_train = dataset_class(
+                            root=self.root,
+                            train=True,
+                            download=self.download,
+                            transform=self.transform,
+                        )
+                        self.dataset_test = dataset_class(
+                            root=self.root,
+                            train=False,
+                            download=self.download,
+                            transform=self.test_transform,
+                        )
+                    except (TypeError, ValueError):
+                        # Last resort: create a dataset and split it manually
+                        dataset = dataset_class(
+                            root=self.root,
+                            download=self.download,
+                            transform=self.transform,
+                        )
+                        # Create train/test split
+                        indices = list(range(len(dataset)))
+                        np.random.shuffle(indices)
+                        split_idx = int(len(indices) * 0.8)  # 80% for training
+                        train_indices = indices[:split_idx]
+                        test_indices = indices[split_idx:]
+                        self.dataset_train = Subset(dataset, train_indices)
+                        # Create a new dataset with test transform
+                        test_dataset = dataset_class(
+                            root=self.root,
+                            download=self.download,
+                            transform=self.test_transform,
+                        )
+                        self.dataset_test = Subset(test_dataset, test_indices)
+        except Exception as e:
+            raise ValueError(f"Failed to initialize {self.task} dataset: {str(e)}")
+
+    def _setup_custom_vtab_dataset(self):
+        """Setup custom VTAB dataset."""
         # Check if dataset exists
-        dataset_path = os.path.join(self.root, f"vtab-{self.task}")
+        dataset_path = os.path.join(self.root, self.task)
         if not os.path.exists(dataset_path) and self.download:
             raise ValueError(
                 f"VTAB {self.task} dataset must be downloaded manually. "
@@ -1927,3 +2168,202 @@ class ImageListDataset(Dataset):
             img = self.transform(img)
 
         return img, target
+
+
+class MergedTaskDataset(ContinualDataset):
+    """Dataset that merges multiple task datasets with class subsetting.
+
+    This class allows you to:
+    1. Subset multiple task datasets by specifying the number of classes to use from each
+    2. Merge these subsets into one larger dataset with proper class indexing
+    3. Use the merged dataset for continual learning
+
+    Example usage:
+        merged_dataset = MergedTaskDataset(
+            root="/path/to/data",
+            num_steps=3,
+            classes_per_step=10,
+            task_subsets={
+                "dtd": 10,                # Use 10 classes from DTD
+                "oxford_flowers102": 10, # Use 10 classes from Oxford Flowers
+                "oxford_iiit_pet": 10,   # Use 10 classes from Oxford Pets
+            },
+            transform=transform,
+            test_transform=test_transform,
+            download=True,
+            seed=42,
+        )
+    """
+
+    def __init__(
+        self,
+        root: str,
+        num_steps: int,
+        classes_per_step: int,
+        task_subsets: Dict[
+            str, int
+        ],  # Dict mapping task names to number of classes to use
+        transform: Optional[Callable] = None,
+        test_transform: Optional[Callable] = None,
+        target_transform: Optional[Callable] = None,
+        download: bool = True,
+        seed: int = 42,
+        class_order: Optional[List[int]] = None,
+    ):
+        super().__init__(
+            root=root,
+            num_steps=num_steps,
+            classes_per_step=classes_per_step,
+            transform=transform,
+            test_transform=test_transform,
+            target_transform=target_transform,
+            download=download,
+            seed=seed,
+        )
+
+        self.task_subsets = task_subsets
+
+        # Validate tasks
+        valid_tasks = {
+            "cifar100": 100,
+            "caltech101": 102,
+            "dtd": 47,
+            "oxford_flowers102": 102,
+            "oxford_iiit_pet": 37,
+            "sun397": 397,
+            "svhn": 10,
+            "patch_camelyon": 2,
+            "eurosat": 10,
+            "resisc45": 45,
+            "diabetic_retinopathy": 5,
+            "clevr_count": 8,
+            "clevr_distance": 6,
+            "dmlab": 6,
+            "kitti": 4,
+            "smallnorb_azimuth": 18,
+            "smallnorb_elevation": 9,
+            "dsprites_orientation": 16,
+            "dsprites_location": 16,
+        }
+
+        # Check if all tasks are valid
+        for task, num_classes in self.task_subsets.items():
+            if task not in valid_tasks:
+                raise ValueError(f"Unsupported task: {task}")
+            if num_classes > valid_tasks[task]:
+                raise ValueError(
+                    f"Requested {num_classes} classes from {task}, but it only has {valid_tasks[task]} classes"
+                )
+
+        # Calculate total number of classes
+        self.num_classes = sum(self.task_subsets.values())
+
+        # Set class order (either provided or random)
+        if class_order is None:
+            self.class_order = list(range(self.num_classes))
+            np.random.shuffle(self.class_order)
+        else:
+            assert len(class_order) == self.num_classes, (
+                "Class order must contain all classes"
+            )
+            self.class_order = class_order
+
+        self.setup()
+
+    def setup(self):
+        """Setup merged dataset by loading and merging task subsets."""
+        train_datasets = []
+        test_datasets = []
+
+        # Keep track of class remapping for each task
+        self.class_remapping = {}
+        current_class_offset = 0
+
+        # Process each task
+        for task_name, num_classes in self.task_subsets.items():
+            # Create a temporary VTAB dataset for this task
+            task_dataset = VTABCL(
+                root=self.root,
+                num_steps=1,  # Not relevant for our purpose
+                classes_per_step=1,  # Not relevant for our purpose
+                transform=self.transform,
+                test_transform=self.test_transform,
+                target_transform=self.target_transform,
+                download=self.download,
+                seed=self.seed,
+                task=task_name,
+            )
+
+            # Randomly select classes from this task
+            available_classes = list(range(task_dataset.num_classes))
+            np.random.shuffle(available_classes)
+            selected_classes = available_classes[:num_classes]
+
+            # Create class remapping for this task
+            # Maps original class IDs to new sequential IDs in the merged dataset
+            task_class_map = {}
+            for i, class_id in enumerate(selected_classes):
+                task_class_map[class_id] = current_class_offset + i
+
+            self.class_remapping[task_name] = task_class_map
+
+            # Get indices for selected classes from train dataset
+            train_indices = task_dataset._get_indices_for_classes(
+                task_dataset.dataset_train, selected_classes
+            )
+
+            # Get indices for selected classes from test dataset
+            test_indices = task_dataset._get_indices_for_classes(
+                task_dataset.dataset_test, selected_classes
+            )
+
+            # Create remapped datasets with new class IDs
+            train_subset = self._create_remapped_subset(
+                task_dataset.dataset_train, train_indices, task_class_map
+            )
+
+            test_subset = self._create_remapped_subset(
+                task_dataset.dataset_test, test_indices, task_class_map
+            )
+
+            # Add to our list of datasets
+            train_datasets.append(train_subset)
+            test_datasets.append(test_subset)
+
+            # Update class offset for the next task
+            current_class_offset += num_classes
+
+        # Merge all datasets
+        self.dataset_train = ConcatDataset(train_datasets)
+        self.dataset_test = ConcatDataset(test_datasets)
+
+    def _create_remapped_subset(self, dataset, indices, class_map):
+        """Create a subset with remapped class IDs.
+
+        Args:
+            dataset: The original dataset
+            indices: Indices to include in the subset
+            class_map: Mapping from original class IDs to new class IDs
+
+        Returns:
+            A dataset with remapped class IDs
+        """
+        return RemappedSubset(dataset, indices, class_map)
+
+
+class RemappedSubset(Dataset):
+    """Subset of a dataset with remapped class IDs."""
+
+    def __init__(self, dataset, indices, class_map):
+        self.dataset = dataset
+        self.indices = indices
+        self.class_map = class_map
+
+    def __len__(self):
+        return len(self.indices)
+
+    def __getitem__(self, idx):
+        image, target = self.dataset[self.indices[idx]]
+        # Remap the target to the new class ID
+        remapped_target = self.class_map[target]
+        return image, remapped_target

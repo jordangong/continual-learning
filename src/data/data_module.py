@@ -12,6 +12,7 @@ from src.data.datasets import (
     DomainNetCL,
     ImageNetACL,
     ImageNetRCL,
+    MergedTaskDataset,
     ObjectNet200CL,
     ObjectNetCL,
     OmniBench300CL,
@@ -188,17 +189,35 @@ class DataModule:
                 class_order=None,  # Use random class order by default
             )
         elif dataset_name == "vtab":
-            self.dataset = VTABCL(
-                root=self.data_dir,
-                num_steps=self.continual_config["num_steps"],
-                classes_per_step=self.continual_config["classes_per_step"],
-                transform=self.train_transform,
-                test_transform=self.test_transform,
-                target_transform=None,
-                download=True,
-                seed=self.config["seed"],
-                task=self.dataset_config.get("task", "cifar100"),
-            )
+            # Check if we're using the merged dataset option
+            merged_task_subsets = self.dataset_config.get("merged_task_subsets", {})
+
+            if merged_task_subsets and len(merged_task_subsets) > 0:
+                # Using merged dataset with multiple tasks
+                self.dataset = MergedTaskDataset(
+                    root=self.data_dir,
+                    num_steps=self.continual_config["num_steps"],
+                    classes_per_step=self.continual_config["classes_per_step"],
+                    task_subsets=merged_task_subsets,
+                    transform=self.train_transform,
+                    test_transform=self.test_transform,
+                    target_transform=None,
+                    download=True,
+                    seed=self.config["seed"],
+                )
+            else:
+                # Using single task VTAB dataset
+                self.dataset = VTABCL(
+                    root=self.data_dir,
+                    num_steps=self.continual_config["num_steps"],
+                    classes_per_step=self.continual_config["classes_per_step"],
+                    transform=self.train_transform,
+                    test_transform=self.test_transform,
+                    target_transform=None,
+                    download=True,
+                    seed=self.config["seed"],
+                    task=self.dataset_config.get("task", "cifar100"),
+                )
         else:
             raise ValueError(f"Unsupported dataset: {dataset_name}")
 
