@@ -1,15 +1,15 @@
-name: vit_base_patch16_224.augreg_in21k
+name: vit_base_patch16_clip_224.openai
 source: timm  # Options: timm, openclip
 pretrained: true
 freeze_backbone: false  # Whether to freeze the backbone during training
 freeze_classifier: false  # Whether to freeze the classifier during training
 feature_dim: 768  # Feature dimension for ViT base
 classifier:
-  type: linear  # Options: linear, mlp
+  type: linear  # Options: linear, mlp, prototypical
   hidden_dim: 512  # Only used if type is mlp
   dropout: 0.1
   normalize: false
-  temperature: 1.0
+  temperature: 1.0  # Temperature scaling parameter for logits (lower values make predictions more confident)
 sae:
   use_sae: false
   checkpoint_path: "/path/to/your/sae_checkpoint.pt"

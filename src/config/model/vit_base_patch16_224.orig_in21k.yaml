@@ -10,3 +10,8 @@ classifier:
   dropout: 0.1
   normalize: false
   temperature: 1.0  # Temperature scaling parameter for logits (lower values make predictions more confident)
+sae:
+  use_sae: false
+  checkpoint_path: "/path/to/your/sae_checkpoint.pt"
+  layer: -2  # Apply SAE to the second-to-last transformer layer
+  token_type: all  # Apply SAE to 'patch', 'cls', or 'all'

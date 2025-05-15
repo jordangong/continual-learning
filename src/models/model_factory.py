@@ -7,6 +7,12 @@ import torch.nn as nn
 import torch.nn.functional as F
 from tqdm import tqdm
 
+# Import for SAE
+try:
+    import saev.nn
+except ImportError:
+    print("Warning: saev module not found. SAE functionality will not be available.")
+
 
 class PrototypicalClassifier(nn.Module):
     """Prototypical classifier using class prototypes for zero-shot classification."""
@@ -16,23 +22,16 @@ class PrototypicalClassifier(nn.Module):
         in_features: int,
         num_classes: int,
         normalize: bool = True,
-        device: Optional[torch.device] = None,
     ):
         """
         Args:
             in_features: Input feature dimension
             num_classes: Number of output classes
-            device: Optional device to place tensors on
         """
         super().__init__()
         self.in_features = in_features
         self.num_classes = num_classes
         self.normalize = normalize
-        self.device = (
-            device
-            if device is not None
-            else torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        )
 
         # Initialize prototypes as learnable parameters
         self.prototypes = nn.Parameter(torch.zeros(num_classes, in_features))
@@ -143,7 +142,6 @@ class ClassifierHead(nn.Module):
         dropout: float = 0.0,
         temperature: float = 1.0,
         normalize: bool = True,
-        device: Optional[torch.device] = None,
     ):
         """
         Args:
@@ -153,7 +151,6 @@ class ClassifierHead(nn.Module):
             hidden_dim: Hidden dimension for MLP (only used if classifier_type is mlp)
             dropout: Dropout probability
             temperature: Temperature scaling parameter for logits
-            device: Optional device to place tensors on (used by prototypical)
         """
         super().__init__()
         self.classifier_type = classifier_type
@@ -173,7 +170,7 @@ class ClassifierHead(nn.Module):
             )
         elif classifier_type == "prototypical":
             self.classifier = PrototypicalClassifier(
-                in_features, num_classes, normalize=normalize, device=device
+                in_features, num_classes, normalize=normalize
             )
         else:
             raise ValueError(f"Unsupported classifier type: {classifier_type}")
@@ -232,6 +229,19 @@ class PretrainedModel(nn.Module):
         # Store cache directory
         self.cache_dir = cache_dir
 
+        # SAE configuration
+        self.sae_config = model_config.get("sae", {})
+        self.use_sae = self.sae_config.get("use_sae", False)
+        self.sae_checkpoint_path = self.sae_config.get("checkpoint_path", None)
+        self.sae_layer = self.sae_config.get("layer", -2)
+        self.sae_token_type = self.sae_config.get("token_type", "all")
+        self.sae = None
+
+        if self.use_sae and not self.sae_checkpoint_path:
+            raise ValueError(
+                "SAE checkpoint path must be provided when use_sae is True"
+            )
+
         # Load backbone
         self.backbone, self.feature_dim = self._load_backbone()
 
@@ -256,7 +266,6 @@ class PretrainedModel(nn.Module):
             dropout=dropout,
             temperature=temperature,
             normalize=normalize,
-            device=self.device,
         )
 
         # Freeze classifier if specified
@@ -280,22 +289,109 @@ class PretrainedModel(nn.Module):
                 # For ViT models
                 feature_dim = model.embed_dim
 
+            # Load SAE if configured
+            if self.use_sae and hasattr(saev, "nn"):
+                self.sae = saev.nn.load(self.sae_checkpoint_path)
+                # Wrap the model to intercept activations at the specified layer
+                if hasattr(model, "blocks") and isinstance(model.blocks, nn.Sequential):
+                    self._wrap_transformer_blocks(model)
+
             return model, feature_dim
 
         elif self.source.lower() == "openclip":
             model, _, _ = open_clip.create_model_and_transforms(
                 self.model_name,
-                pretrained=self.pretrained if self.pretrained else False,
+                pretrained=self.pretrained if self.pretrained else None,
                 cache_dir=self.cache_dir,
             )
             # Get feature dimension (for CLIP models)
             feature_dim = model.visual.output_dim
+
+            # Load SAE if configured
+            if self.use_sae and hasattr(saev, "nn"):
+                self.sae = saev.nn.load(self.sae_checkpoint_path)
+                # Wrap the visual transformer blocks to intercept activations at the specified layer
+                if hasattr(model.visual, "transformer") and hasattr(
+                    model.visual.transformer, "resblocks"
+                ):
+                    self._wrap_transformer_blocks(model.visual)
 
             # Return only the visual part of CLIP
             return model.visual, feature_dim
 
         else:
             raise ValueError(f"Unsupported model source: {self.source}")
+
+    def _wrap_transformer_blocks(self, model):
+        """Wrap transformer blocks to intercept activations at the specified layer."""
+        # Determine which attribute contains the transformer blocks
+        if hasattr(model, "blocks"):
+            blocks_attr = "blocks"
+        elif hasattr(model, "transformer") and hasattr(model.transformer, "resblocks"):
+            blocks_attr = "transformer.resblocks"
+        else:
+            raise ValueError(
+                f"Cannot find transformer blocks in model {self.model_name}"
+            )
+
+        # Get the blocks
+        if blocks_attr == "blocks":
+            blocks = model.blocks
+        else:
+            blocks = model.transformer.resblocks
+
+        # Calculate the actual layer index (handle negative indexing)
+        num_blocks = len(blocks)
+        layer_idx = (
+            self.sae_layer if self.sae_layer >= 0 else num_blocks + self.sae_layer
+        )
+
+        # Ensure the layer index is valid
+        if layer_idx < 0 or layer_idx >= num_blocks:
+            raise ValueError(
+                f"Invalid layer index {self.sae_layer} for model with {num_blocks} blocks"
+            )
+
+        # Get the target block
+        target_block = blocks[layer_idx]
+
+        # Store the original forward method
+        self.original_forward = target_block.forward
+
+        # Define a new forward method that applies SAE
+        def new_forward(self_block, x, *args, **kwargs):
+            # Call the original forward method
+            output = self.original_forward(x, *args, **kwargs)
+
+            # Apply SAE to the output
+            if self.use_sae and self.sae is not None:
+                # Determine which tokens to apply SAE to based on configuration
+                if self.sae_token_type == "cls":
+                    # Apply SAE only to CLS token (first token)
+                    cls_token = output[:, 0:1, :]
+                    reconstructed_cls, _, _, _ = self.sae(cls_token)
+                    # Replace only the CLS token in the output
+                    reconstructed_output = output.clone()
+                    reconstructed_output[:, 0:1, :] = reconstructed_cls
+                elif self.sae_token_type == "patch":
+                    # Apply SAE only to patch tokens (all except first token)
+                    patch_tokens = output[:, 1:, :]
+                    reconstructed_patches, _, _, _ = self.sae(patch_tokens)
+                    # Replace only the patch tokens in the output
+                    reconstructed_output = output.clone()
+                    reconstructed_output[:, 1:, :] = reconstructed_patches
+                else:  # "all" - default
+                    # Apply SAE to all tokens
+                    reconstructed_output, _, _, _ = self.sae(output)
+
+                return reconstructed_output
+
+            return output
+
+        # Replace the forward method
+        import types
+
+        target_block.forward = types.MethodType(new_forward, target_block)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Forward pass."""
