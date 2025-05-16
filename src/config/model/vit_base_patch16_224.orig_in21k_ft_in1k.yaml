@@ -4,6 +4,7 @@ pretrained: true
 freeze_backbone: false  # Whether to freeze the backbone during training
 freeze_classifier: false  # Whether to freeze the classifier during training
 feature_dim: 768  # Feature dimension for ViT base
+skip_blocks: 0  # Number of final transformer blocks to skip
 skip_final_norm: false  # Whether to skip final norm layer after transformer blocks, before head
 classifier:
   type: linear  # Options: linear, mlp, prototypical

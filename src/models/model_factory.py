@@ -220,6 +220,7 @@ class PretrainedModel(nn.Module):
         self.pretrained = model_config.get("pretrained", True)
         self.freeze_backbone = model_config.get("freeze_backbone", False)
         self.freeze_classifier = model_config.get("freeze_classifier", False)
+        self.skip_blocks = model_config.get("skip_blocks", 0)
         self.skip_final_norm = model_config.get("skip_final_norm", False)
         self.skip_proj = model_config.get("skip_proj", None)
         if self.skip_proj is not None and self.source.lower() != "openclip":
@@ -308,6 +309,11 @@ class PretrainedModel(nn.Module):
                 if hasattr(model, "blocks") and isinstance(model.blocks, nn.Sequential):
                     self._wrap_transformer_blocks(model)
 
+            # Apply block skipping if configured
+            if self.skip_blocks > 0:
+                if hasattr(model, "blocks") and isinstance(model.blocks, nn.Sequential):
+                    self._skip_transformer_blocks(model)
+
             return model, feature_dim
 
         elif self.source.lower() == "openclip":
@@ -349,11 +355,59 @@ class PretrainedModel(nn.Module):
                 ):
                     self._wrap_transformer_blocks(model.visual)
 
+            # Apply block skipping if configured
+            if self.skip_blocks > 0:
+                if hasattr(model.visual, "transformer") and hasattr(
+                    model.visual.transformer, "resblocks"
+                ):
+                    self._skip_transformer_blocks(model.visual)
+
             # Return only the visual part of CLIP
             return model.visual, feature_dim
 
         else:
             raise ValueError(f"Unsupported model source: {self.source}")
+
+    def _skip_transformer_blocks(self, model):
+        """Skip the final k transformer blocks if skip_blocks > 0.
+        This is separate from the SAE functionality.
+        """
+        # Determine which attribute contains the transformer blocks
+        if hasattr(model, "blocks"):
+            blocks_attr = "blocks"
+        elif hasattr(model, "transformer") and hasattr(model.transformer, "resblocks"):
+            blocks_attr = "transformer.resblocks"
+        else:
+            raise ValueError(
+                f"Cannot find transformer blocks in model {self.model_name}"
+            )
+
+        # Get the blocks
+        if blocks_attr == "blocks":
+            blocks = model.blocks
+        else:
+            blocks = model.transformer.resblocks
+
+        num_blocks = len(blocks)
+
+        # Skip the final k blocks
+        if self.skip_blocks >= num_blocks:
+            raise ValueError(
+                f"Cannot skip {self.skip_blocks} blocks when model only has {num_blocks} blocks"
+            )
+
+        # Create a new Sequential module with only the blocks we want to keep
+        if blocks_attr == "blocks":
+            model.blocks = nn.Sequential(*list(blocks)[: num_blocks - self.skip_blocks])
+        else:
+            model.transformer.resblocks = nn.Sequential(
+                *list(blocks)[: num_blocks - self.skip_blocks]
+            )
+
+        print(
+            f"Skipped the final {self.skip_blocks} blocks.",
+            f"New number of blocks: {num_blocks - self.skip_blocks}",
+        )
 
     def _wrap_transformer_blocks(self, model):
         """Wrap transformer blocks to intercept activations at the specified layer."""
