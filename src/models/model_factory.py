@@ -220,6 +220,12 @@ class PretrainedModel(nn.Module):
         self.pretrained = model_config.get("pretrained", True)
         self.freeze_backbone = model_config.get("freeze_backbone", False)
         self.freeze_classifier = model_config.get("freeze_classifier", False)
+        self.skip_final_norm = model_config.get("skip_final_norm", False)
+        self.skip_proj = model_config.get("skip_proj", None)
+        if self.skip_proj is not None and self.source.lower() != "openclip":
+            raise ValueError(
+                "The 'skip_proj' option is only supported for OpenCLIP models"
+            )
         self.device = (
             device
             if device is not None
@@ -289,6 +295,12 @@ class PretrainedModel(nn.Module):
                 # For ViT models
                 feature_dim = model.embed_dim
 
+            # Skip the norm layer if configured (for ViT models)
+            if self.skip_final_norm and hasattr(model, "norm"):
+                # Replace the norm layer with an identity layer
+                model.norm = nn.Identity()
+                print(f"Replaced norm layer with Identity in {self.model_name}")
+
             # Load SAE if configured
             if self.use_sae and hasattr(saev, "nn"):
                 self.sae = saev.nn.load(self.sae_checkpoint_path)
@@ -304,7 +316,28 @@ class PretrainedModel(nn.Module):
                 pretrained=self.pretrained if self.pretrained else None,
                 cache_dir=self.cache_dir,
             )
-            # Get feature dimension (for CLIP models)
+
+            # Skip the norm layer if configured (for OpenCLIP ViT models)
+            if self.skip_final_norm and hasattr(model.visual, "ln_post"):
+                # Replace the ln_post (norm) layer with an identity layer
+                model.visual.ln_post = nn.Identity()
+                print(
+                    f"Replaced ln_post layer with Identity in OpenCLIP {self.model_name}"
+                )
+
+            # Skip the projection layer if configured (for OpenCLIP ViT models)
+            if self.skip_proj and hasattr(model.visual, "proj"):
+                # Replace the projection layer with an identity layer or None
+                if model.visual.proj is not None:
+                    # Update the output dimension to match the pre-projection dimension
+                    if hasattr(model.visual, "output_dim") and hasattr(
+                        model.visual.proj, "shape"
+                    ):
+                        model.visual.output_dim = model.visual.proj.shape[0]
+                    model.visual.proj = None
+                    print(f"Removed projection layer in OpenCLIP {self.model_name}")
+
+            # Get feature dimension (for CLIP models) - after potential modifications
             feature_dim = model.visual.output_dim
 
             # Load SAE if configured
