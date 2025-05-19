@@ -1,5 +1,5 @@
 import os
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import torch
 from torch.utils.data import DataLoader, Subset
@@ -25,7 +25,12 @@ from src.data.transforms import get_transforms
 class DataModule:
     """Data module for continual learning."""
 
-    def __init__(self, config: Dict[str, Any]):
+    def __init__(
+        self,
+        config: Dict[str, Any],
+        pretrained_mean: List[float] = None,
+        pretrained_std: List[float] = None,
+    ):
         """
         Args:
             config: Configuration dictionary
@@ -39,11 +44,15 @@ class DataModule:
         # Create data directory if it doesn't exist
         os.makedirs(self.data_dir, exist_ok=True)
 
+        # Use pretrained normalization parameters if available, otherwise use dataset config
+        mean = pretrained_mean if pretrained_mean is not None else self.dataset_config["mean"]
+        std = pretrained_std if pretrained_std is not None else self.dataset_config["std"]
+
         # Setup transforms
         self.train_transform, self.test_transform = get_transforms(
             input_size=self.dataset_config["input_size"],
-            mean=self.dataset_config["mean"],
-            std=self.dataset_config["std"],
+            mean=mean,
+            std=std,
             augmentation=self.dataset_config.get("augmentation", None),
         )
 

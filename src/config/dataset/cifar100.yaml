@@ -1,5 +1,6 @@
 name: cifar100
 input_size: 224  # Resize to match pretrained model input size
+use_pretrained_norm: true
 mean: [0.5071, 0.4867, 0.4408]
 std: [0.2675, 0.2565, 0.2761]
 num_classes: 100

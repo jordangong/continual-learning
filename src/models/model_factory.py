@@ -565,6 +565,54 @@ class PretrainedModel(nn.Module):
                 labels_device_list = []
 
 
+def get_pretrained_normalization_params(
+    model_config: Dict[str, Any],
+    cache_dir: Optional[str] = None,
+) -> Tuple[List[float], List[float]]:
+    """
+    Get the normalization parameters (mean and std) used by the pretrained model.
+
+    Args:
+        model_config: Model configuration
+        cache_dir: Optional cache directory for model weights
+
+    Returns:
+        Tuple of (mean, std) for normalization
+    """
+    source = model_config.get("source", "timm").lower()
+    model_name = model_config.get("name", "resnet50")
+
+    # Default ImageNet normalization
+    default_mean = [0.485, 0.456, 0.406]
+    default_std = [0.229, 0.224, 0.225]
+
+    if source == "timm":
+        # Get the default_cfg from timm
+        default_cfg = timm.models.get_pretrained_cfg(model_name)
+        # Handle both dictionary and PretrainedCfg object
+        if hasattr(default_cfg, "mean") and hasattr(default_cfg, "std"):
+            # PretrainedCfg object case
+            return default_cfg.mean, default_cfg.std
+        elif isinstance(default_cfg, dict) and "mean" in default_cfg and "std" in default_cfg:
+            # Dictionary case
+            return default_cfg["mean"], default_cfg["std"]
+
+    elif source == "openclip":
+        # For OpenCLIP, we create the model and transforms to get normalization params
+        _, preprocess, _ = open_clip.create_model_and_transforms(
+            model_name,
+            pretrained=None,  # Don't need weights for this
+            cache_dir=cache_dir,
+        )
+        # Extract normalization parameters from the transform pipeline
+        for transform in preprocess.transforms:
+            if hasattr(transform, "mean") and hasattr(transform, "std"):
+                return transform.mean, transform.std
+
+    # Return default ImageNet normalization if we couldn't extract from model
+    return default_mean, default_std
+
+
 def create_model(
     model_config: Dict[str, Any],
     num_classes: int,

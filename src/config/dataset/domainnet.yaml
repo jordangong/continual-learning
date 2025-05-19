@@ -1,5 +1,6 @@
 name: domainnet
 input_size: 224  # Resize to match pretrained model input size
+use_pretrained_norm: true
 mean: [0.485, 0.456, 0.406]  # ImageNet mean
 std: [0.229, 0.224, 0.225]  # ImageNet std
 num_classes: 345  # DomainNet has 345 classes

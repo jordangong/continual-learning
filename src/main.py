@@ -12,7 +12,7 @@ import wandb
 from omegaconf import DictConfig, OmegaConf
 
 from src.data.data_module import DataModule
-from src.models.model_factory import create_model
+from src.models.model_factory import create_model, get_pretrained_normalization_params
 from src.trainers.trainer import ContinualTrainer
 from src.utils.logging import plot_accuracy_curve, plot_forgetting_curve, setup_logger
 from src.utils.metrics import forgetting
@@ -95,11 +95,20 @@ def run_training(
     else:
         logger = None
 
-    # Setup data module
-    data_module = DataModule(config)
+    # Get pretrained model's normalization parameters if needed
+    cache_dir = config["paths"].get("cache_dir", None)
+    pretrained_mean, pretrained_std = None, None
+    if config["dataset"].get("use_pretrained_norm", True):
+        pretrained_mean, pretrained_std = get_pretrained_normalization_params(
+            model_config=config["model"],
+            cache_dir=cache_dir,
+        )
+        print(
+            "Using pretrained model's normalization:",
+            f"mean={pretrained_mean}, std={pretrained_std}",
+        )
 
     # Setup model
-    cache_dir = config["paths"].get("cache_dir", None)
     model = create_model(
         model_config=config["model"],
         num_classes=config["dataset"]["num_classes"],
@@ -113,6 +122,13 @@ def run_training(
         config=config,
         device=device,
         local_rank=rank if distributed else -1,
+    )
+
+    # Setup data module
+    data_module = DataModule(
+        config,
+        pretrained_mean=pretrained_mean,
+        pretrained_std=pretrained_std,
     )
 
     # Train or evaluate on each step
