@@ -20,3 +20,4 @@ augmentation:
   auto_augment: false
   auto_augment_policy: "imagenet"
   test_center_crop: true
+  normalize: true

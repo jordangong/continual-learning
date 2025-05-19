@@ -13,3 +13,4 @@ augmentation:
   auto_augment: false
   auto_augment_policy: "cifar10"
   test_center_crop: false
+  normalize: true

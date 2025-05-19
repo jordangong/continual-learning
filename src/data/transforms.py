@@ -32,6 +32,7 @@ def get_transforms(
             "auto_augment": False,
             "auto_augment_policy": "imagenet",
             "test_center_crop": True,
+            "normalize": True,
         }
 
     # Test transform
@@ -44,9 +45,10 @@ def get_transforms(
     else:
         test_transforms = [transforms.Resize((input_size, input_size))]
 
-    test_transforms.extend(
-        [transforms.ToTensor(), transforms.Normalize(mean=mean, std=std)]
-    )
+    test_transforms.append(transforms.ToTensor())
+
+    if augmentation.get("normalize", True):
+        test_transforms.append(transforms.Normalize(mean=mean, std=std))
 
     test_transform = transforms.Compose(test_transforms)
 
@@ -90,9 +92,10 @@ def get_transforms(
         train_transforms.append(transforms.AutoAugment(policy))
 
     # Add final transforms
-    train_transforms.extend(
-        [transforms.ToTensor(), transforms.Normalize(mean=mean, std=std)]
-    )
+    train_transforms.append(transforms.ToTensor())
+
+    if augmentation.get("normalize", True):
+        train_transforms.append(transforms.Normalize(mean=mean, std=std))
 
     train_transform = transforms.Compose(train_transforms)
 
