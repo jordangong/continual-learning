@@ -1,6 +1,7 @@
 from typing import Any, Dict, List, Tuple
 
 from torchvision import transforms
+from torchvision.transforms import InterpolationMode
 
 from src.data.moment_matching import MomentMatchingTransform
 
@@ -43,11 +44,19 @@ def get_transforms(
     if augmentation.get("test_center_crop", True):
         resize_size = int((256 / 224) * input_size)
         test_transforms = [
-            transforms.Resize(resize_size),
+            transforms.Resize(
+                resize_size,
+                interpolation=InterpolationMode.BICUBIC,
+            ),
             transforms.CenterCrop(input_size),
         ]
     else:
-        test_transforms = [transforms.Resize((input_size, input_size))]
+        test_transforms = [
+            transforms.Resize(
+                (input_size, input_size),
+                interpolation=InterpolationMode.BICUBIC,
+            )
+        ]
 
     test_transforms.append(transforms.ToTensor())
 
@@ -75,11 +84,22 @@ def get_transforms(
     if augmentation.get("random_resized_crop", True):
         scale = augmentation.get("random_resized_crop_scale", (0.08, 1.0))
         ratio = augmentation.get("random_resized_crop_ratio", (3 / 4, 4 / 3))
-        train_transforms.append(transforms.RandomResizedCrop(input_size, scale=scale, ratio=ratio))
+        train_transforms.append(
+            transforms.RandomResizedCrop(
+                input_size,
+                scale=scale,
+                ratio=ratio,
+                interpolation=InterpolationMode.BICUBIC,
+            )
+        )
     else:
         # Fall back to traditional resize if random_resized_crop is disabled
-        train_transforms.append(transforms.Resize((input_size, input_size)))
-
+        train_transforms.append(
+            transforms.Resize(
+                (input_size, input_size),
+                interpolation=InterpolationMode.BICUBIC,
+            )
+        )
         # Add random crop if enabled
         if augmentation.get("random_crop", False):
             train_transforms.append(transforms.RandomCrop(input_size, padding=4))
