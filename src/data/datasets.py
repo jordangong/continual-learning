@@ -487,13 +487,11 @@ class CUB200CL(ContinualDataset):
                 test_images.append(img_path)
                 test_targets.append(target)
 
-        # Create custom datasets with remove_border=True to remove the 1-pixel red border
-        # as mentioned in the ObjectNet documentation: https://objectnet.dev/download.html
         self.dataset_train = ImageListDataset(
-            train_images, train_targets, transform=self.transform, remove_border=True
+            train_images, train_targets, transform=self.transform
         )
         self.dataset_test = ImageListDataset(
-            test_images, test_targets, transform=self.test_transform, remove_border=True
+            test_images, test_targets, transform=self.test_transform
         )
 
 

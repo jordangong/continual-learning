@@ -1,13 +1,16 @@
-from typing import Dict, List, Tuple
+from typing import Any, Dict, List, Tuple
 
 from torchvision import transforms
+
+from src.data.moment_matching import MomentMatchingTransform
 
 
 def get_transforms(
     input_size: int,
     mean: List[float],
     std: List[float],
-    augmentation: Dict[str, bool] = None,
+    augmentation: Dict[str, Any] = None,
+    apply_moment_matching: bool = False,
 ) -> Tuple[transforms.Compose, transforms.Compose]:
     """
     Get train and test transforms for image data.
@@ -16,7 +19,8 @@ def get_transforms(
         input_size: Input size for images
         mean: Mean values for normalization
         std: Standard deviation values for normalization
-        augmentation: Dictionary of augmentation options
+        augmentation: Dictionary of augmentation options, including moment matching parameters if needed
+        apply_moment_matching: Whether to apply moment matching to align data statistics
 
     Returns:
         Tuple of (train_transform, test_transform)
@@ -46,6 +50,18 @@ def get_transforms(
         test_transforms = [transforms.Resize((input_size, input_size))]
 
     test_transforms.append(transforms.ToTensor())
+
+    # Apply moment matching if requested
+    if apply_moment_matching and "moment_matching" in augmentation:
+        mm_params = augmentation["moment_matching"]
+        test_transforms.append(
+            MomentMatchingTransform(
+                current_data_mean=mm_params["current_data_mean"],
+                current_data_std=mm_params["current_data_std"],
+                pretraining_data_mean=mm_params["pretraining_data_mean"],
+                pretraining_data_std=mm_params["pretraining_data_std"],
+            )
+        )
 
     if augmentation.get("normalize", True):
         test_transforms.append(transforms.Normalize(mean=mean, std=std))
@@ -93,6 +109,18 @@ def get_transforms(
 
     # Add final transforms
     train_transforms.append(transforms.ToTensor())
+
+    # Apply moment matching if requested
+    if apply_moment_matching and "moment_matching" in augmentation:
+        mm_params = augmentation["moment_matching"]
+        train_transforms.append(
+            MomentMatchingTransform(
+                current_data_mean=mm_params["current_data_mean"],
+                current_data_std=mm_params["current_data_std"],
+                pretraining_data_mean=mm_params["pretraining_data_mean"],
+                pretraining_data_std=mm_params["pretraining_data_std"],
+            )
+        )
 
     if augmentation.get("normalize", True):
         train_transforms.append(transforms.Normalize(mean=mean, std=std))

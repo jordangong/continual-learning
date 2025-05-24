@@ -1,6 +1,7 @@
 name: objectnet200
 input_size: 224  # Resize to match pretrained model input size
 use_pretrained_norm: true
+apply_moment_matching: false
 mean: [0.485, 0.456, 0.406]  # ImageNet mean
 std: [0.229, 0.224, 0.225]   # ImageNet std
 num_classes: 200  # ObjectNet-200 subset with 200 classes
@@ -15,3 +16,7 @@ augmentation:
   auto_augment_policy: "imagenet"
   test_center_crop: true
   normalize: true
+  moment_matching:
+    pretraining_data_mean: [0.4845, 0.4541, 0.4025]
+    pretraining_data_std: [0.2724, 0.2637, 0.2761]
+

@@ -1,8 +1,9 @@
 import os
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 import torch
-from torch.utils.data import DataLoader, Subset
+from torch.utils.data import ConcatDataset, DataLoader, Subset
+from torchvision import transforms
 
 from src.data.datasets import (
     CIFAR100CL,
@@ -28,12 +29,14 @@ class DataModule:
     def __init__(
         self,
         config: Dict[str, Any],
-        pretrained_mean: List[float] = None,
-        pretrained_std: List[float] = None,
+        model_normalization_mean: Tuple[float] = None,
+        model_normalization_std: Tuple[float] = None,
     ):
         """
         Args:
             config: Configuration dictionary
+            model_normalization_mean: Mean values used by the pretrained model for normalization (default: dataset config mean)
+            model_normalization_std: Standard deviation values used by the pretrained model for normalization (default: dataset config std)
         """
         self.config = config
         self.dataset_config = config["dataset"]
@@ -44,20 +47,151 @@ class DataModule:
         # Create data directory if it doesn't exist
         os.makedirs(self.data_dir, exist_ok=True)
 
-        # Use pretrained normalization parameters if available, otherwise use dataset config
-        mean = pretrained_mean if pretrained_mean is not None else self.dataset_config["mean"]
-        std = pretrained_std if pretrained_std is not None else self.dataset_config["std"]
-
-        # Setup transforms
-        self.train_transform, self.test_transform = get_transforms(
-            input_size=self.dataset_config["input_size"],
-            mean=mean,
-            std=std,
-            augmentation=self.dataset_config.get("augmentation", None),
+        # Use model normalization parameters if available, otherwise use dataset config
+        self.mean = (
+            model_normalization_mean
+            if model_normalization_mean is not None
+            else self.dataset_config["mean"]
+        )
+        self.std = (
+            model_normalization_std
+            if model_normalization_std is not None
+            else self.dataset_config["std"]
         )
 
-        # Initialize dataset
+        # Get augmentation config
+        self.augmentation = self.dataset_config.get("augmentation", None)
+
+        # Create initial transforms without moment matching
+        # These will be used temporarily during dataset setup
+        self.train_transform, self.test_transform = get_transforms(
+            input_size=self.dataset_config["input_size"],
+            mean=self.mean,
+            std=self.std,
+            augmentation=self.augmentation,
+            apply_moment_matching=False,  # No moment matching yet
+        )
+
+        # Initialize dataset with temporary transforms
         self.setup_dataset()
+
+        # Now that we have the dataset, we can set up the final transforms with moment matching if needed
+        apply_moment_matching = self.dataset_config.get("apply_moment_matching", False)
+        if apply_moment_matching:
+            self.apply_moment_matching_transforms()
+
+    def calculate_dataset_statistics(self):
+        """Calculate dataset statistics for moment matching."""
+        # Use the training dataset for calculating statistics
+        dataset_for_stats = self.dataset.dataset_train
+
+        # Create a temporary transform that converts to tensor (without scaling) for statistics calculation
+        temp_transform = transforms.PILToTensor()
+
+        # Save original transforms and apply temporary transform
+        if isinstance(dataset_for_stats, ConcatDataset):
+            # Handle ConcatDataset case
+            original_transforms = []
+            for dataset in dataset_for_stats.datasets:
+                original_transforms.append(dataset.transform)
+                dataset.transform = temp_transform
+        elif hasattr(dataset_for_stats, "dataset"):
+            # Handle Subset case
+            original_transform = dataset_for_stats.dataset.transform
+            dataset_for_stats.dataset.transform = temp_transform
+        else:
+            # Handle regular dataset case
+            original_transform = dataset_for_stats.transform
+            dataset_for_stats.transform = temp_transform
+
+        # Calculate dataset statistics
+        from src.data.moment_matching import calculate_dataset_statistics
+
+        current_data_mean, current_data_std = calculate_dataset_statistics(
+            dataset_for_stats
+        )
+        # Scale std to match the range [0, 1]
+        current_data_std = current_data_std / 255.0
+        current_data_mean = current_data_mean / 255.0
+
+        # Restore original transforms
+        if isinstance(dataset_for_stats, ConcatDataset):
+            for i, dataset in enumerate(dataset_for_stats.datasets):
+                dataset.transform = original_transforms[i]
+        elif hasattr(dataset_for_stats, "dataset"):
+            dataset_for_stats.dataset.transform = original_transform
+        else:
+            dataset_for_stats.transform = original_transform
+
+        return tuple(current_data_mean.tolist()), tuple(current_data_std.tolist())
+
+    def apply_moment_matching_transforms(self):
+        """Apply moment matching transforms to align data statistics with pretraining data.
+
+        Uses pretraining data statistics from augmentation config if available,
+        otherwise defaults to ImageNet statistics.
+        """
+        # Calculate dataset statistics
+        current_data_mean, current_data_std = self.calculate_dataset_statistics()
+
+        # Ensure augmentation config exists
+        self.augmentation = self.augmentation or {}
+
+        # Setup moment matching config with defaults and current dataset statistics
+        # The ImageNet statistics are from: https://github.com/pytorch/vision/issues/1439
+        # The std is corrected with sqrt(mean([var(img) for img in dataset])), rather than mean([std(img) for img in dataset])
+        moment_matching_config = self.augmentation.get("moment_matching", {})
+        # Get pretraining data statistics (use defaults if not provided)
+        pretraining_mean = moment_matching_config.get(
+            "pretraining_data_mean", (0.4845, 0.4541, 0.4025)
+        )
+        pretraining_std = moment_matching_config.get(
+            "pretraining_data_std", (0.2724, 0.2637, 0.2761)
+        )
+
+        # Update config with calculated statistics
+        moment_matching_config.update(
+            {
+                "current_data_mean": current_data_mean,
+                "current_data_std": current_data_std,
+                "pretraining_data_mean": tuple(pretraining_mean),
+                "pretraining_data_std": tuple(pretraining_std),
+            }
+        )
+
+        # Print statistics for debugging
+        print("Dataset statistics for moment matching:")
+        print(f"  Current dataset mean: {current_data_mean}")
+        print(f"  Current dataset std:  {current_data_std}")
+        print(f"  Pretraining mean:     {tuple(pretraining_mean)}")
+        print(f"  Pretraining std:      {tuple(pretraining_std)}")
+        self.augmentation["moment_matching"] = moment_matching_config
+
+        # Setup transforms with moment matching
+        self.train_transform, self.test_transform = get_transforms(
+            input_size=self.dataset_config["input_size"],
+            mean=self.mean,
+            std=self.std,
+            augmentation=self.augmentation,
+            apply_moment_matching=True,
+        )
+
+        # Update the dataset transforms
+        if isinstance(self.dataset.dataset_train, ConcatDataset):
+            for dataset in self.dataset.dataset_train.datasets:
+                dataset.transform = self.train_transform
+        elif hasattr(self.dataset.dataset_train, "dataset"):
+            self.dataset.dataset_train.dataset.transform = self.train_transform
+        else:
+            self.dataset.dataset_train.transform = self.train_transform
+
+        if isinstance(self.dataset.dataset_test, ConcatDataset):
+            for dataset in self.dataset.dataset_test.datasets:
+                dataset.transform = self.test_transform
+        elif hasattr(self.dataset.dataset_test, "dataset"):
+            self.dataset.dataset_test.dataset.transform = self.test_transform
+        else:
+            self.dataset.dataset_test.transform = self.test_transform
 
     def setup_dataset(self):
         """Setup the dataset based on the configuration."""

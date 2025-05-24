@@ -568,7 +568,7 @@ class PretrainedModel(nn.Module):
 def get_pretrained_normalization_params(
     model_config: Dict[str, Any],
     cache_dir: Optional[str] = None,
-) -> Tuple[List[float], List[float]]:
+) -> Tuple[Tuple[float], Tuple[float]]:
     """
     Get the normalization parameters (mean and std) used by the pretrained model.
 
@@ -583,8 +583,8 @@ def get_pretrained_normalization_params(
     model_name = model_config.get("name", "resnet50")
 
     # Default ImageNet normalization
-    default_mean = [0.485, 0.456, 0.406]
-    default_std = [0.229, 0.224, 0.225]
+    default_mean = (0.485, 0.456, 0.406)
+    default_std = (0.229, 0.224, 0.225)
 
     if source == "timm":
         # Get the default_cfg from timm

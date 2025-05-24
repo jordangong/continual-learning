@@ -97,15 +97,16 @@ def run_training(
 
     # Get pretrained model's normalization parameters if needed
     cache_dir = config["paths"].get("cache_dir", None)
-    pretrained_mean, pretrained_std = None, None
+    pretrained_model_mean, pretrained_model_std = None, None
     if config["dataset"].get("use_pretrained_norm", True):
-        pretrained_mean, pretrained_std = get_pretrained_normalization_params(
-            model_config=config["model"],
-            cache_dir=cache_dir,
+        pretrained_model_mean, pretrained_model_std = (
+            get_pretrained_normalization_params(
+                model_config=config["model"], cache_dir=cache_dir
+            )
         )
         print(
             "Using pretrained model's normalization:",
-            f"mean={pretrained_mean}, std={pretrained_std}",
+            f"mean={pretrained_model_mean}, std={pretrained_model_std}",
         )
 
     # Setup model
@@ -127,8 +128,8 @@ def run_training(
     # Setup data module
     data_module = DataModule(
         config,
-        pretrained_mean=pretrained_mean,
-        pretrained_std=pretrained_std,
+        model_normalization_mean=pretrained_model_mean,
+        model_normalization_std=pretrained_model_std,
     )
 
     # Train or evaluate on each step
@@ -178,24 +179,27 @@ def run_training(
             # Initialize prototypes from training data but with test transforms
             # Create a temporary data loader with test transforms for prototype initialization
             # This ensures consistent feature extraction without augmentations
-            if hasattr(train_loader.dataset, "dataset"):
-                # Handle nested datasets (e.g., Subsets)
-                temp_dataset = train_loader.dataset.dataset
-            elif hasattr(train_loader.dataset, "datasets"):
-                # Handle concatenated datasets
-                temp_dataset = train_loader.dataset.datasets
-            else:
-                temp_dataset = train_loader.dataset
+            temp_dataset = []
+            trainset = train_loader.dataset
+            # Handle nested datasets (e.g., Subsets, Concatenated datasets)
+            while True:
+                if hasattr(trainset, "dataset"):
+                    trainset = trainset.dataset
+                elif hasattr(trainset, "datasets"):
+                    trainset = trainset.datasets
+                else:
+                    if isinstance(trainset, list):
+                        temp_dataset.extend(trainset)
+                    else:
+                        temp_dataset.append(trainset)
+                    break
 
             # Store original transform and temporarily replace with test transform
             original_transforms = []
-            # Handle both single dataset and list of datasets
-            if not isinstance(temp_dataset, list):
-                temp_dataset = [temp_dataset]
             for dataset in temp_dataset:
-                if hasattr(dataset, "transform"):
-                    original_transforms.append(dataset.transform)
-                    dataset.transform = data_module.test_transform
+                assert hasattr(dataset, "transform"), f"Dataset {dataset} does not have a transform attribute"
+                original_transforms.append(dataset.transform)
+                dataset.transform = data_module.test_transform
 
             # Create a temporary data loader with evaluation batch size for faster processing
             temp_loader = torch.utils.data.DataLoader(
@@ -211,12 +215,9 @@ def run_training(
 
             # Restore original transform
             if original_transforms:
-                # Handle both single dataset and list of datasets
-                if not isinstance(temp_dataset, list):
-                    temp_dataset = [temp_dataset]
-                for dataset, original in zip(temp_dataset, original_transforms):
-                    if hasattr(dataset, "transform"):
-                        dataset.transform = original
+               for dataset, original in zip(temp_dataset, original_transforms):
+                    assert hasattr(dataset, "transform"), f"Dataset {dataset} does not have a transform attribute"
+                    dataset.transform = original
 
         # Train or evaluate on current step
         start_time = time.time()
