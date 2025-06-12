@@ -36,7 +36,7 @@ augmentation:
   random_resized_crop_ratio: [0.75, 1.3333333333333333]
   random_crop: false
   random_horizontal_flip: true
-  color_jitter: true
+  color_jitter: false
   auto_augment: false
   auto_augment_policy: "imagenet"
   test_center_crop: true
