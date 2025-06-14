@@ -12,6 +12,7 @@ classifier:
   dropout: 0.1
   normalize: false
   temperature: 1.0
+  learnable_temperature: false
 sae:
   use_sae: false
   checkpoint_path: "/path/to/your/sae_checkpoint.pt"

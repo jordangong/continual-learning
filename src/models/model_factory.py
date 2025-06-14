@@ -142,6 +142,7 @@ class ClassifierHead(nn.Module):
         dropout: float = 0.0,
         temperature: float = 1.0,
         normalize: bool = True,
+        learnable_temperature: bool = False,
     ):
         """
         Args:
@@ -151,10 +152,14 @@ class ClassifierHead(nn.Module):
             hidden_dim: Hidden dimension for MLP (only used if classifier_type is mlp)
             dropout: Dropout probability
             temperature: Temperature scaling parameter for logits
+            learnable_temperature: Whether the temperature should be a learnable parameter
         """
         super().__init__()
         self.classifier_type = classifier_type
-        self.temperature = temperature
+        if learnable_temperature:
+            self.temperature = nn.Parameter(torch.tensor(temperature))
+        else:
+            self.temperature = temperature
 
         if classifier_type == "linear":
             self.classifier = nn.Linear(in_features, num_classes)
@@ -264,6 +269,7 @@ class PretrainedModel(nn.Module):
         dropout = classifier_config.get("dropout", 0.0)
         temperature = classifier_config.get("temperature", 1.0)
         normalize = classifier_config.get("normalize", False)
+        learnable_temperature = classifier_config.get("learnable_temperature", False)
 
         self.classifier = ClassifierHead(
             in_features=self.feature_dim,
@@ -273,6 +279,7 @@ class PretrainedModel(nn.Module):
             dropout=dropout,
             temperature=temperature,
             normalize=normalize,
+            learnable_temperature=learnable_temperature,
         )
 
         # Freeze classifier if specified
@@ -593,7 +600,11 @@ def get_pretrained_normalization_params(
         if hasattr(default_cfg, "mean") and hasattr(default_cfg, "std"):
             # PretrainedCfg object case
             return default_cfg.mean, default_cfg.std
-        elif isinstance(default_cfg, dict) and "mean" in default_cfg and "std" in default_cfg:
+        elif (
+            isinstance(default_cfg, dict)
+            and "mean" in default_cfg
+            and "std" in default_cfg
+        ):
             # Dictionary case
             return default_cfg["mean"], default_cfg["std"]
 
