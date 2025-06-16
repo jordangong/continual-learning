@@ -198,18 +198,22 @@ class ContinualTrainer:
         # Get the correct model reference (module if distributed)
         model_to_use = self.model.module if self.distributed else self.model
 
-        # Get backbone learning rate multiplier from optimizer config
+        # Get backbone and prompt learning rate multiplier from optimizer config
         backbone_lr_multiplier = optimizer_config.get("backbone_lr_multiplier", 1.0)
+        prompt_lr_multiplier = optimizer_config.get("prompt_lr_multiplier", 1.0)
 
         # Create parameter groups with different learning rates if multiplier is not 1.0
-        if backbone_lr_multiplier != 1.0:
+        if backbone_lr_multiplier != 1.0 or prompt_lr_multiplier != 1.0:
             backbone_params = []
+            prompt_params = []
             other_params = []
 
             # Separate backbone parameters from other parameters
             for name, param in model_to_use.named_parameters():
                 if "backbone" in name:
                     backbone_params.append(param)
+                if "prompt" in name:
+                    prompt_params.append(param)
                 else:
                     other_params.append(param)
 
@@ -218,6 +222,10 @@ class ContinualTrainer:
                 {"params": backbone_params, "lr": lr * backbone_lr_multiplier},
                 {"params": other_params},
             ]
+            if prompt_params:
+                param_groups.append(
+                    {"params": prompt_params, "lr": lr * prompt_lr_multiplier}
+                )
         else:
             # Use all parameters with the same learning rate
             param_groups = model_to_use.parameters()
@@ -570,6 +578,21 @@ class ContinualTrainer:
                         ewc_loss = self._compute_ewc_loss()
                         loss += ewc_lambda * ewc_loss
 
+                    # Add prompt tuning auxiliary losses if needed
+                    if self.continual_config["strategy"] == "prompt_tuning":
+                        aux_losses = self._get_prompt_auxiliary_losses()
+                        for aux_name, aux_loss in aux_losses.items():
+                            if aux_name == "diversity_loss":
+                                diversity_weight = self.continual_config.get(
+                                    "prompt_tuning", {}
+                                ).get("diversity_weight", 0.01)
+                                loss += diversity_weight * aux_loss
+                            elif aux_name == "similarity_loss":
+                                similarity_weight = self.continual_config.get(
+                                    "prompt_tuning", {}
+                                ).get("similarity_weight", 0.01)
+                                loss += similarity_weight * aux_loss
+
                 # For float16, use the gradient scaler
                 if self.mixed_precision_dtype == torch.float16:
                     # Scale loss and do backward pass
@@ -620,6 +643,21 @@ class ContinualTrainer:
                     ewc_lambda = self.continual_config.get("ewc_lambda", 1.0)
                     ewc_loss = self._compute_ewc_loss()
                     loss += ewc_lambda * ewc_loss
+
+                # Add prompt tuning auxiliary losses if needed
+                if self.continual_config["strategy"] == "prompt_tuning":
+                    aux_losses = self._get_prompt_auxiliary_losses()
+                    for aux_name, aux_loss in aux_losses.items():
+                        if aux_name == "diversity_loss":
+                            diversity_weight = self.continual_config.get(
+                                "prompt_tuning", {}
+                            ).get("diversity_weight", 0.01)
+                            loss += diversity_weight * aux_loss
+                        elif aux_name == "similarity_loss":
+                            similarity_weight = self.continual_config.get(
+                                "prompt_tuning", {}
+                            ).get("similarity_weight", 0.01)
+                            loss += similarity_weight * aux_loss
 
                 # Backward pass
                 loss.backward()
@@ -988,11 +1026,12 @@ class ContinualTrainer:
         should_show_pbar = not self.distributed or (
             self.distributed and self.local_rank == 0
         )
-        data_iter = (
-            tqdm(train_loader, desc="Computing EWC data")
-            if should_show_pbar
-            else train_loader
-        )
+
+        # Set description based on debug mode
+        debug_enabled = self.debug_config.get("enabled", False)
+        desc = "Computing EWC data [DEBUG]" if debug_enabled else "Computing EWC data"
+
+        data_iter = tqdm(train_loader, desc=desc) if should_show_pbar else train_loader
 
         for inputs, targets in data_iter:
             inputs, targets = inputs.to(self.device), targets.to(self.device)
@@ -1154,3 +1193,21 @@ class ContinualTrainer:
                 ).sum()
 
         return loss
+
+    def _get_prompt_auxiliary_losses(self) -> Dict[str, torch.Tensor]:
+        """
+        Compute auxiliary losses for prompt tuning.
+
+        Returns:
+            Dictionary of auxiliary losses
+        """
+        aux_losses = {}
+
+        # Get the correct model reference (module if distributed)
+        model_to_use = self.model.module if self.distributed else self.model
+
+        # Check if the model has prompt tuning auxiliary losses
+        if hasattr(model_to_use, "get_auxiliary_losses"):
+            aux_losses.update(model_to_use.get_auxiliary_losses())
+
+        return aux_losses

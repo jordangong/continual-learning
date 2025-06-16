@@ -13,6 +13,8 @@ try:
 except ImportError:
     print("Warning: saev module not found. SAE functionality will not be available.")
 
+from .vit_prompt_tuning import create_vit_prompted_model
+
 
 class PrototypicalClassifier(nn.Module):
     """Prototypical classifier using class prototypes for zero-shot classification."""
@@ -489,11 +491,11 @@ class PretrainedModel(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Forward pass."""
-        features = self.backbone(x)
+        features = self.forward_features(x)
         logits = self.classifier(features)
         return logits
 
-    def get_features(self, x: torch.Tensor) -> torch.Tensor:
+    def forward_features(self, x: torch.Tensor) -> torch.Tensor:
         """Extract features without classification."""
         return self.backbone(x)
 
@@ -629,6 +631,7 @@ def create_model(
     num_classes: int,
     device: str = "cuda",
     cache_dir: Optional[str] = None,
+    continual_config: Optional[Dict[str, Any]] = None,
 ) -> nn.Module:
     """
     Create a model based on configuration.
@@ -638,6 +641,7 @@ def create_model(
         num_classes: Number of output classes
         device: Device to put model on
         cache_dir: Optional cache directory for model weights
+        continual_config: Optional configuration for continual learning
 
     Returns:
         Instantiated model
@@ -649,6 +653,18 @@ def create_model(
         cache_dir=cache_dir,
         device=device_obj,
     )
+
+    # Add prompt tuning if configured
+    if continual_config.get("strategy", "") == "prompt_tuning":
+        assert (
+            model_config["name"].startswith("vit") and model_config["source"] == "timm"
+        ), "Prompt tuning is only supported for timm ViT models"
+        model = create_vit_prompted_model(
+            base_model=model,
+            prompt_config=continual_config.get("prompt_tuning", {}),
+            embed_dim=model.feature_dim,
+            num_classes=num_classes,
+        )
 
     model = model.to(device_obj)
     return model

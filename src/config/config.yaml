@@ -37,9 +37,21 @@ continual:
   num_steps: 10                # Number of continual learning steps
   classes_per_step: 10         # Number of classes per step
   memory_size: 2000            # Size of memory buffer for rehearsal (if used)
-  strategy: "finetune"         # Options: finetune, ewc, replay, zeroshot etc.
+  strategy: "finetune"         # Options: finetune, ewc, replay, zeroshot, prompt_tuning etc.
   mask_logits: true            # Enable logit masking for non-current task classes, except replay samples
   entropy_prediction: false    # Enable entropy-based logit selection before prediction
+  
+  # Prompt tuning parameters (used when strategy is "prompt_tuning")
+  prompt_tuning:
+    prompt_length: 10            # Number of prompt tokens
+    init_type: "random"          # Options: random, from_vocab, uniform
+    prompt_dropout: 0.0          # Dropout rate for prompt tokens
+    prompt_pool: false           # Use a pool of prompts to select from
+    pool_size: 10                # Size of prompt pool (if prompt_pool is true)
+    key_diversity_regularization: false  # Add diversity regularization for prompt selection
+    shared_prompts: true         # Share prompts across all classes vs class-specific prompts
+    similarity_weight: 0.01      # Weight for similarity loss between queries and keys
+    diversity_weight: 0.01       # Weight for diversity regularization loss
 
 # Training hyperparameters
 training:

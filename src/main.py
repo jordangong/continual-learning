@@ -115,6 +115,7 @@ def run_training(
         num_classes=config["dataset"]["num_classes"],
         device=device,
         cache_dir=cache_dir,
+        continual_config=config["continual"],
     )
 
     # Setup trainer with distributed info if applicable
