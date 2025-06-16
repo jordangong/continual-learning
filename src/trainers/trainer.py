@@ -212,7 +212,7 @@ class ContinualTrainer:
             for name, param in model_to_use.named_parameters():
                 if "backbone" in name:
                     backbone_params.append(param)
-                if "prompt" in name:
+                elif "prompt" in name:
                     prompt_params.append(param)
                 else:
                     other_params.append(param)
