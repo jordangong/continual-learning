@@ -266,7 +266,7 @@ class ViTPromptedModel(nn.Module):
 
     def _init_simple_prompts(self):
         """initialize simple prompt embeddings."""
-        self.prompt_embeddings = nn.parameter(
+        self.prompt_embeddings = nn.Parameter(
             torch.empty(self.prompt_length, self.embed_dim)
         )
         init_type = self.prompt_config.get("init_type", "random")
