@@ -40,11 +40,11 @@ continual:
   strategy: "finetune"         # Options: finetune, ewc, replay, zeroshot, prompt_tuning etc.
   mask_logits: true            # Enable logit masking for non-current task classes, except replay samples
   entropy_prediction: false    # Enable entropy-based logit selection before prediction
-  
+
   # Prompt tuning parameters (used when strategy is "prompt_tuning")
   prompt_tuning:
     prompt_length: 10            # Number of prompt tokens
-    init_type: "random"          # Options: random, from_vocab, uniform
+    init_type: "random"          # Options: random, uniform, xavier
     prompt_dropout: 0.0          # Dropout rate for prompt tokens
     prompt_pool: false           # Use a pool of prompts to select from
     pool_size: 10                # Size of prompt pool (if prompt_pool is true)
