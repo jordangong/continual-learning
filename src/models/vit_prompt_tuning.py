@@ -29,6 +29,7 @@ class PromptPool(nn.Module):
         top_k: int = 5,
         batchwise_prompt: bool = True,
         prompt_key_init: str = "uniform",
+        init_config: dict = None,
     ):
         """
         Initialize the prompt pool.
@@ -42,47 +43,58 @@ class PromptPool(nn.Module):
             top_k: Number of top prompts to select
             batchwise_prompt: Whether to select prompts per batch or per sample
             prompt_key_init: Initialization type for prompt keys
+            init_config: Configuration for initialization parameters
         """
         super().__init__()
 
         self.pool_size = pool_size
         self.prompt_length = prompt_length
         self.embed_dim = embed_dim
+        self.init_type = init_type
+        self.key_diversity_regularization = key_diversity_regularization
         self.top_k = top_k
         self.batchwise_prompt = batchwise_prompt
-        self.key_diversity_regularization = key_diversity_regularization
 
-        # Initialize prompt pool
+        # Initialize configuration with defaults
+        self.init_config = init_config or {}
+
+        # Create prompt pool and keys
         self.prompt_pool = nn.Parameter(
             torch.empty(pool_size, prompt_length, embed_dim)
         )
-
-        # Initialize prompt keys for selection
         self.prompt_key = nn.Parameter(torch.empty(pool_size, embed_dim))
 
-        # Initialize parameters
+        # Initialize prompts and keys
         self._init_prompts(init_type)
         self._init_keys(prompt_key_init)
 
     def _init_prompts(self, init_type: str):
         """Initialize prompt embeddings."""
         if init_type == "random":
-            nn.init.normal_(self.prompt_pool, std=0.02)
+            std = self.init_config.get("normal_std", 0.02)
+            nn.init.normal_(self.prompt_pool, std=std)
         elif init_type == "uniform":
-            nn.init.uniform_(self.prompt_pool, -0.1, 0.1)
+            uniform_range = self.init_config.get("uniform_range", [-0.1, 0.1])
+            nn.init.uniform_(self.prompt_pool, uniform_range[0], uniform_range[1])
         elif init_type == "xavier":
             nn.init.xavier_uniform_(self.prompt_pool)
         else:
-            nn.init.normal_(self.prompt_pool, std=0.02)
+            std = self.init_config.get("normal_std", 0.02)
+            nn.init.normal_(self.prompt_pool, std=std)
 
     def _init_keys(self, init_type: str):
         """Initialize prompt keys."""
-        if init_type == "uniform":
-            nn.init.uniform_(self.prompt_key, -1, 1)
-        elif init_type == "normal":
-            nn.init.normal_(self.prompt_key, std=0.02)
+        if init_type == "normal":
+            std = self.init_config.get("normal_std", 0.02)
+            nn.init.normal_(self.prompt_key, std=std)
+        elif init_type == "uniform":
+            uniform_range = self.init_config.get("uniform_range", [-0.1, 0.1])
+            nn.init.uniform_(self.prompt_key, uniform_range[0], uniform_range[1])
+        elif init_type == "xavier":
+            nn.init.xavier_uniform_(self.prompt_key)
         else:
-            nn.init.uniform_(self.prompt_key, -1, 1)
+            std = self.init_config.get("normal_std", 0.02)
+            nn.init.normal_(self.prompt_key, std=std)
 
     def forward(
         self, query: torch.Tensor, train: bool = True
@@ -220,7 +232,11 @@ class ViTPromptedModel(nn.Module):
             key_diversity_regularization=self.prompt_config.get(
                 "key_diversity_regularization", False
             ),
-            top_k=min(5, self.prompt_config.get("pool_size", 10)),
+            top_k=min(
+                self.prompt_config.get("top_k", 5),
+                self.prompt_config.get("pool_size", 10),
+            ),
+            init_config=self.prompt_config.get("init_config", None),
         )
 
     def _init_simple_prompts(self):
@@ -229,14 +245,19 @@ class ViTPromptedModel(nn.Module):
             torch.empty(self.prompt_length, self.embed_dim)
         )
         init_type = self.prompt_config.get("init_type", "random")
+        init_config = self.prompt_config.get("init_config", {})
+
         if init_type == "random":
-            nn.init.normal_(self.prompt_embeddings, std=0.02)
+            std = init_config.get("normal_std", 0.02)
+            nn.init.normal_(self.prompt_embeddings, std=std)
         elif init_type == "uniform":
-            nn.init.uniform_(self.prompt_embeddings, -0.1, 0.1)
+            uniform_range = init_config.get("uniform_range", [-0.1, 0.1])
+            nn.init.uniform_(self.prompt_embeddings, uniform_range[0], uniform_range[1])
         elif init_type == "xavier":
             nn.init.xavier_uniform_(self.prompt_embeddings)
         else:
-            nn.init.normal_(self.prompt_embeddings, std=0.02)
+            std = init_config.get("normal_std", 0.02)
+            nn.init.normal_(self.prompt_embeddings, std=std)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """

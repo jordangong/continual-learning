@@ -49,9 +49,12 @@ continual:
     prompt_pool: false           # Use a pool of prompts to select from
     pool_size: 10                # Size of prompt pool (if prompt_pool is true)
     key_diversity_regularization: false  # Add diversity regularization for prompt selection
-    shared_prompts: true         # Share prompts across all classes vs class-specific prompts
+    top_k: 4                     # Number of top prompts to select from pool
     similarity_weight: 0.01      # Weight for similarity loss between queries and keys
     diversity_weight: 0.01       # Weight for diversity regularization loss
+    init_config:                 # Initialization configuration
+      normal_std: 0.02           # Standard deviation for normal initialization
+      uniform_range: [-0.1, 0.1] # Range for uniform initialization [min, max]
 
 # Training hyperparameters
 training:
