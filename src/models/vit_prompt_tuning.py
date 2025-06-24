@@ -27,7 +27,7 @@ class PromptPool(nn.Module):
         init_type: str = "random",
         key_diversity_regularization: bool = False,
         top_k: int = 5,
-        batchwise_prompt: bool = True,
+        batchwise_prompt: bool = False,
         prompt_key_init: str = "uniform",
         init_config: dict = None,
     ):
@@ -107,7 +107,7 @@ class PromptPool(nn.Module):
             train: Whether in training mode
 
         Returns:
-            Tuple of (selected_prompts, prompt_mask, similarity_scores)
+            Tuple of (selected_prompts, similarity, top_k_similarity)
         """
         batch_size = query.size(0)
 
@@ -123,35 +123,28 @@ class PromptPool(nn.Module):
         if self.batchwise_prompt:
             # Select top-k prompts based on average similarity across batch
             avg_similarity = similarity.mean(dim=0)  # [pool_size]
-            _, top_k_indices = torch.topk(avg_similarity, self.top_k, dim=0)
+            top_k_similarity, top_k_indices = torch.topk(
+                avg_similarity, self.top_k, dim=0
+            )
 
             # Expand indices for all samples in batch
             top_k_indices = top_k_indices.unsqueeze(0).expand(batch_size, -1)
         else:
             # Select top-k prompts for each sample
-            _, top_k_indices = torch.topk(similarity, self.top_k, dim=1)
+            top_k_similarity, top_k_indices = torch.topk(similarity, self.top_k, dim=1)
 
         # Get selected prompts
         # top_k_indices: [batch_size, top_k]
         # prompt_pool: [pool_size, prompt_length, embed_dim]
-        selected_prompts = self.prompt_pool[
-            top_k_indices
-        ]  # [batch_size, top_k, prompt_length, embed_dim]
+        selected_prompts = self.prompt_pool[top_k_indices]
+        # [batch_size, top_k, prompt_length, embed_dim]
 
         # Reshape to [batch_size, top_k * prompt_length, embed_dim]
         selected_prompts = selected_prompts.view(
             batch_size, self.top_k * self.prompt_length, self.embed_dim
         )
 
-        # Create prompt mask (all ones since we're using all selected prompts)
-        prompt_mask = torch.ones(
-            batch_size,
-            self.top_k * self.prompt_length,
-            dtype=torch.bool,
-            device=query.device,
-        )
-
-        return selected_prompts, prompt_mask, similarity
+        return selected_prompts, similarity, top_k_similarity
 
     def get_diversity_loss(self, similarity: torch.Tensor) -> torch.Tensor:
         """
@@ -299,10 +292,10 @@ class ViTPromptedModel(nn.Module):
     def forward_features(self, x: torch.Tensor) -> torch.Tensor:
         if self.use_prompt_pool:
             query = self.base_model.forward_features(x)
-            prompt_embeddings, _, similarity = self.prompt_pool(
+            prompt_embeddings, similarity, top_k_similarity = self.prompt_pool(
                 query, train=self.training
             )
-            self._last_similarity = similarity
+            self._last_similarity = top_k_similarity
             self._last_diversity_loss = self.prompt_pool.get_diversity_loss(similarity)
         else:
             prompt_embeddings = self.prompt_embeddings.unsqueeze(0).expand(
