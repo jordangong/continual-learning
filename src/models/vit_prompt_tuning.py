@@ -3,7 +3,7 @@ Vision Transformer specific prompt tuning implementation.
 Based on Learning to Prompt (L2P) paper with ViT integration.
 """
 
-from typing import Any, Dict, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -173,6 +173,34 @@ class PromptPool(nn.Module):
         return diversity_loss
 
 
+def global_pool_nlc(
+    x: torch.Tensor,
+    pool_type: str = "token",
+    num_prefix_tokens: int = 1,
+    num_prompt_tokens: int = 0,
+    reduce_include_prefix: bool = False,
+):
+    if not pool_type:
+        return x
+
+    if pool_type == "token":
+        x = x[:, 0]  # class token
+    elif pool_type == "prompt_avg":
+        x = x[:, :num_prompt_tokens].mean(dim=1)
+    else:
+        x = x if reduce_include_prefix else x[:, num_prefix_tokens:]
+        if pool_type == "avg":
+            x = x.mean(dim=1)
+        elif pool_type == "avgmax":
+            x = 0.5 * (x.amax(dim=1) + x.mean(dim=1))
+        elif pool_type == "max":
+            x = x.amax(dim=1)
+        else:
+            assert not pool_type, f"Unknown pool type {pool_type}"
+
+    return x
+
+
 class ViTPromptedModel(nn.Module):
     """
     Vision Transformer with prompt tuning support.
@@ -205,6 +233,7 @@ class ViTPromptedModel(nn.Module):
         # Prompt configuration
         self.prompt_length = prompt_config.get("prompt_length", 10)
         self.use_prompt_pool = prompt_config.get("prompt_pool", False)
+        self.omit_cls_token = prompt_config.get("omit_cls_token", False)
 
         # Initialize prompts
         if self.use_prompt_pool:
@@ -217,6 +246,10 @@ class ViTPromptedModel(nn.Module):
 
     def _init_prompt_pool(self):
         """Initialize prompt pool."""
+        top_k = min(
+            self.prompt_config.get("top_k", 5),
+            self.prompt_config.get("pool_size", 10),
+        )
         self.prompt_pool = PromptPool(
             pool_size=self.prompt_config.get("pool_size", 10),
             prompt_length=self.prompt_length,
@@ -225,16 +258,15 @@ class ViTPromptedModel(nn.Module):
             key_diversity_regularization=self.prompt_config.get(
                 "key_diversity_regularization", False
             ),
-            top_k=min(
-                self.prompt_config.get("top_k", 5),
-                self.prompt_config.get("pool_size", 10),
-            ),
+            top_k=top_k,
             init_config=self.prompt_config.get("init_config", None),
         )
 
+        self.num_prompt_tokens = self.prompt_length * top_k
+
     def _init_simple_prompts(self):
-        """Initialize simple prompt embeddings."""
-        self.prompt_embeddings = nn.Parameter(
+        """initialize simple prompt embeddings."""
+        self.prompt_embeddings = nn.parameter(
             torch.empty(self.prompt_length, self.embed_dim)
         )
         init_type = self.prompt_config.get("init_type", "random")
@@ -252,18 +284,20 @@ class ViTPromptedModel(nn.Module):
             std = init_config.get("normal_std", 0.02)
             nn.init.normal_(self.prompt_embeddings, std=std)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        self.num_prompt_tokens = self.prompt_length
+
+    def forward(self, x: torch.tensor) -> torch.tensor:
         """
-        Forward pass through ViT with prompts integrated.
+        forward pass through vit with prompts integrated.
 
-        Args:
-            x: Input tensor [batch_size, channels, height, width]
+        args:
+            x: input tensor [batch_size, channels, height, width]
 
-        Returns:
-            Output logits [batch_size, num_classes]
+        returns:
+            output logits [batch_size, num_classes]
         """
         x = self.forward_features(x)
-        x = self.base_model.backbone.forward_head(x)
+        x = self.forward_head(x)
         x = self.base_model.classifier(x)
 
         return x
@@ -311,6 +345,10 @@ class ViTPromptedModel(nn.Module):
             x[:, : self.base_model.backbone.num_prefix_tokens],
             x[:, self.base_model.backbone.num_prefix_tokens :],
         )
+
+        if self.omit_cls_token:
+            prefix = prefix[:, 1:]
+
         x = torch.cat([prefix, prompt_embeddings, x], dim=1)
 
         x = self.base_model.backbone.norm_pre(x)
@@ -321,6 +359,27 @@ class ViTPromptedModel(nn.Module):
         x = self.base_model.backbone.norm(x)
 
         return x
+
+    def pool(self, x: torch.Tensor, pool_type: Optional[str] = None) -> torch.Tensor:
+        if self.base_model.backbone.attn_pool is not None:
+            x = self.base_model.backbone.attn_pool(x)
+            return x
+        pool_type = (
+            self.base_model.backbone.global_pool if pool_type is None else pool_type
+        )
+        x = global_pool_nlc(
+            x,
+            pool_type=pool_type,
+            num_prefix_tokens=self.base_model.backbone.num_prefix_tokens,
+            num_prompt_tokens=self.num_prompt_tokens,
+        )
+        return x
+
+    def forward_head(self, x: torch.Tensor, pre_logits: bool = False) -> torch.Tensor:
+        x = self.pool(x, pool_type="prompt_avg" if self.omit_cls_token else None)
+        x = self.base_model.backbone.fc_norm(x)
+        x = self.base_model.backbone.head_drop(x)
+        return x if pre_logits else self.base_model.backbone.head(x)
 
 
 def create_vit_prompted_model(

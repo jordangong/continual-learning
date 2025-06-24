@@ -52,6 +52,7 @@ continual:
     top_k: 4                     # Number of top prompts to select from pool
     similarity_weight: 0.01      # Weight for similarity loss between queries and keys
     diversity_weight: 0.01       # Weight for diversity regularization loss
+    omit_cls_token: false        # Whether to omit CLS token when inserting prompts, use avg pooled prompt instead
     init_config:                 # Initialization configuration
       normal_std: 0.02           # Standard deviation for normal initialization
       uniform_range: [-0.1, 0.1] # Range for uniform initialization [min, max]
