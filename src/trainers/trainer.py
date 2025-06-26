@@ -401,6 +401,12 @@ class ContinualTrainer:
             f"{debug_prefix}=== Training Step {step + 1}/{self.continual_config['num_steps']} ==="
         )
 
+        # Reset frequency tracking for L2P-style diversity regularization at the start of each new task
+        if hasattr(self.model, "reset_frequency_tracking"):
+            self.model.reset_frequency_tracking()
+            if debug_enabled:
+                print(f"{debug_prefix}Reset frequency tracking for step {step + 1}")
+
         # Set current task classes for logit masking
         if self.mask_logits:
             self.current_task_classes = set(step_classes)

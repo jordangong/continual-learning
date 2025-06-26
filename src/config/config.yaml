@@ -49,6 +49,7 @@ continual:
     prompt_pool: false           # Use a pool of prompts to select from
     pool_size: 10                # Size of prompt pool (if prompt_pool is true)
     key_diversity_regularization: false  # Add diversity regularization for prompt selection
+    frequency_diversity_regularization: false  # Add L2P-style frequency-based diversity regularization
     top_k: 4                     # Number of top prompts to select from pool
     similarity_weight: 0.01      # Weight for similarity loss between queries and keys
     diversity_weight: 0.01       # Weight for diversity regularization loss

@@ -26,6 +26,7 @@ class PromptPool(nn.Module):
         embed_dim: int,
         init_type: str = "random",
         key_diversity_regularization: bool = False,
+        frequency_diversity_regularization: bool = False,
         top_k: int = 5,
         batchwise_prompt: bool = False,
         prompt_key_init: str = "uniform",
@@ -40,6 +41,7 @@ class PromptPool(nn.Module):
             embed_dim: Embedding dimension
             init_type: Initialization type for prompts
             key_diversity_regularization: Whether to apply diversity regularization
+            frequency_diversity_regularization: Whether to apply L2P-style frequency-based diversity regularization
             top_k: Number of top prompts to select
             batchwise_prompt: Whether to select prompts per batch or per sample
             prompt_key_init: Initialization type for prompt keys
@@ -52,6 +54,7 @@ class PromptPool(nn.Module):
         self.embed_dim = embed_dim
         self.init_type = init_type
         self.key_diversity_regularization = key_diversity_regularization
+        self.frequency_diversity_regularization = frequency_diversity_regularization
         self.top_k = top_k
         self.batchwise_prompt = batchwise_prompt
 
@@ -63,6 +66,11 @@ class PromptPool(nn.Module):
             torch.empty(pool_size, prompt_length, embed_dim)
         )
         self.prompt_key = nn.Parameter(torch.empty(pool_size, embed_dim))
+
+        # Initialize frequency tracking for L2P-style diversity regularization
+        if self.frequency_diversity_regularization:
+            # Register buffer so it's moved to device but not trained
+            self.register_buffer("prompt_frequency", torch.zeros(pool_size, dtype=torch.int))
 
         # Initialize prompts and keys
         self._init_prompts(init_type)
@@ -119,19 +127,41 @@ class PromptPool(nn.Module):
 
         # Compute cosine similarity
         similarity = torch.matmul(query_norm, key_norm.t())  # [batch_size, pool_size]
+        distance = 1 - similarity
+
+        # Apply L2P-style frequency-based diversity regularization during training
+        if train and self.frequency_diversity_regularization:
+            # Normalize frequency to get penalty weights
+            total_frequency = self.prompt_frequency.sum()
+            if total_frequency == 0:
+                normalized_frequency = torch.ones_like(self.prompt_frequency) / self.pool_size
+            else:
+                normalized_frequency = self.prompt_frequency / total_frequency
+            # L2P paper: argmin γ(q(x), k_si) · h_si
+            # To penalize frequent prompts, we multiply distance by frequency
+            frequency_penalty = normalized_frequency.unsqueeze(0).expand(batch_size, -1)
+            distance *= frequency_penalty
 
         if self.batchwise_prompt:
-            # Select top-k prompts based on average similarity across batch
-            avg_similarity = similarity.mean(dim=0)  # [pool_size]
-            top_k_similarity, top_k_indices = torch.topk(
-                avg_similarity, self.top_k, dim=0
+            # Select top-k prompts based on average distance across batch
+            avg_distance = distance.mean(dim=0)  # [pool_size]
+            _, top_k_indices = torch.topk(
+                avg_distance, self.top_k, dim=0, largest=False
             )
 
             # Expand indices for all samples in batch
             top_k_indices = top_k_indices.unsqueeze(0).expand(batch_size, -1)
         else:
             # Select top-k prompts for each sample
-            top_k_similarity, top_k_indices = torch.topk(similarity, self.top_k, dim=1)
+            _, top_k_indices = torch.topk(distance, self.top_k, dim=1, largest=False)
+        top_k_similarity = similarity.gather(1, top_k_indices)
+
+        # Update frequency tracking during training
+        if train and self.frequency_diversity_regularization:
+            # Count how many times each prompt is selected
+            counts = torch.bincount(top_k_indices.flatten(), minlength=self.pool_size)
+            # Update frequency counter
+            self.prompt_frequency += counts
 
         # Get selected prompts
         # top_k_indices: [batch_size, top_k]
@@ -171,6 +201,15 @@ class PromptPool(nn.Module):
         diversity_loss = key_similarity.abs().mean()
 
         return diversity_loss
+
+    def reset_frequency_tracking(self):
+        """
+        Reset frequency tracking for L2P-style diversity regularization.
+        This should be called at the beginning of each new task.
+        """
+        if self.frequency_diversity_regularization:
+            self.prompt_frequency.zero_()
+            self.frequency_update_count = 0
 
 
 def global_pool_nlc(
@@ -257,6 +296,9 @@ class ViTPromptedModel(nn.Module):
             init_type=self.prompt_config.get("init_type", "random"),
             key_diversity_regularization=self.prompt_config.get(
                 "key_diversity_regularization", False
+            ),
+            frequency_diversity_regularization=self.prompt_config.get(
+                "frequency_diversity_regularization", False
             ),
             top_k=top_k,
             init_config=self.prompt_config.get("init_config", None),
@@ -380,6 +422,14 @@ class ViTPromptedModel(nn.Module):
         x = self.base_model.backbone.fc_norm(x)
         x = self.base_model.backbone.head_drop(x)
         return x if pre_logits else self.base_model.backbone.head(x)
+
+    def reset_frequency_tracking(self):
+        """
+        Reset frequency tracking for L2P-style diversity regularization.
+        This should be called at the beginning of each new task.
+        """
+        if hasattr(self, "prompt_pool") and self.prompt_pool is not None:
+            self.prompt_pool.reset_frequency_tracking()
 
 
 def create_vit_prompted_model(
