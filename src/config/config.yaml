@@ -37,9 +37,14 @@ continual:
   num_steps: 10                # Number of continual learning steps
   classes_per_step: 10         # Number of classes per step
   memory_size: 2000            # Size of memory buffer for rehearsal (if used)
-  strategy: "finetune"         # Options: finetune, ewc, replay, zeroshot, prompt_tuning etc.
+  strategy: "finetune"         # Options: finetune, ewc, replay, zeroshot, prompt_tuning, ema etc.
   mask_logits: true            # Enable logit masking for non-current task classes, except replay samples
   entropy_prediction: false    # Enable entropy-based logit selection before prediction
+
+  # EMA parameters (used when strategy is "ema")
+  ema:
+    momentum: 0.999            # EMA momentum (higher = slower update)
+    eval_with_teacher: false   # Use teacher model for final evaluation instead of student
 
   # Prompt tuning parameters (used when strategy is "prompt_tuning")
   prompt_tuning:
