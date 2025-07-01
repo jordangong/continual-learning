@@ -193,6 +193,7 @@ class ContinualTrainer:
         self.ema_enabled = self.continual_config["strategy"] == "ema"
         self.ema_momentum = self.ema_config.get("momentum", 0.999)
         self.ema_eval_with_teacher = self.ema_config.get("eval_with_teacher", False)
+        self.ema_refresh_interval = self.ema_config.get("refresh_interval", None)
         self.ema_teacher_model = None  # Will be initialized at the start of each step
 
     def _setup_optimizer(self) -> torch.optim.Optimizer:
@@ -462,6 +463,16 @@ class ContinualTrainer:
         for epoch in range(num_epochs):
             # Train for one epoch
             train_loss, train_acc = self._train_epoch(train_loader, step, epoch)
+
+            # Refresh EMA teacher if needed (at specified interval)
+            if (
+                self.ema_enabled
+                and self.ema_refresh_interval is not None
+                and (epoch + 1) % self.ema_refresh_interval == 0
+            ):
+                self._initialize_ema_teacher()
+                if debug_enabled:
+                    print(f"{debug_prefix}Refreshed EMA teacher at epoch {epoch + 1}")
 
             # Evaluate if needed
             if (epoch + 1) % self.training_config["eval_every"] == 0:
@@ -974,10 +985,7 @@ class ContinualTrainer:
         }
 
         # Save teacher model state if using EMA
-        if (
-            self.ema_enabled
-            and self.ema_teacher_model is not None
-        ):
+        if self.ema_enabled and self.ema_teacher_model is not None:
             if self.distributed:
                 teacher_state = self.ema_teacher_model.module.state_dict()
             else:
@@ -1339,7 +1347,8 @@ class ContinualTrainer:
         # Update teacher parameters with EMA
         with torch.no_grad():
             for (name, student_param), (_, teacher_param) in zip(
-                student_model.named_parameters(), self.ema_teacher_model.named_parameters()
+                student_model.named_parameters(),
+                self.ema_teacher_model.named_parameters(),
             ):
                 # Skip classifier/head parameters - only update backbone
                 if any(
@@ -1367,7 +1376,8 @@ class ContinualTrainer:
         # Copy teacher backbone parameters to student
         with torch.no_grad():
             for (name, student_param), (_, teacher_param) in zip(
-                student_model.named_parameters(), self.ema_teacher_model.named_parameters()
+                student_model.named_parameters(),
+                self.ema_teacher_model.named_parameters(),
             ):
                 # Skip classifier/head parameters - only replace backbone
                 if any(

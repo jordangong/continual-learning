@@ -45,6 +45,7 @@ continual:
   ema:
     momentum: 0.999            # EMA momentum (higher = slower update)
     eval_with_teacher: false   # Use teacher model for final evaluation instead of student
+    refresh_interval: null     # Refresh teacher every N epochs (null = refresh only at task start)
 
   # Prompt tuning parameters (used when strategy is "prompt_tuning")
   prompt_tuning:
