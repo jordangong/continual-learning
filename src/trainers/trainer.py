@@ -194,6 +194,9 @@ class ContinualTrainer:
         self.ema_momentum = self.ema_config.get("momentum", 0.999)
         self.ema_eval_with_teacher = self.ema_config.get("eval_with_teacher", False)
         self.ema_refresh_interval = self.ema_config.get("refresh_interval", None)
+        self.ema_refresh_at_step_start = self.ema_config.get(
+            "refresh_at_step_start", True
+        )
         self.ema_teacher_model = None  # Will be initialized at the start of each step
 
     def _setup_optimizer(self) -> torch.optim.Optimizer:
@@ -419,11 +422,22 @@ class ContinualTrainer:
         if self.mask_logits:
             self.current_task_classes = set(step_classes)
 
-        # Initialize EMA teacher model at the start of each step
+        # Initialize EMA teacher model at the start of each step (conditionally)
         if self.ema_enabled:
-            self._initialize_ema_teacher()
-            if debug_enabled:
-                print(f"{debug_prefix}Initialized EMA teacher for step {step + 1}")
+            # Always initialize for the first step, or if refresh_at_step_start is enabled
+            if step == 0 or self.ema_refresh_at_step_start:
+                self._initialize_ema_teacher()
+                if debug_enabled:
+                    if step == 0:
+                        print(f"{debug_prefix}Initialized EMA teacher for first step")
+                    else:
+                        print(
+                            f"{debug_prefix}Refreshed EMA teacher at step start {step + 1}"
+                        )
+            elif debug_enabled:
+                print(
+                    f"{debug_prefix}Skipped EMA teacher refresh at step start {step + 1} (using refresh_interval instead)"
+                )
 
         # Apply debug settings if enabled
         if debug_enabled and self.debug_config.get("fast_dev_run", False):
