@@ -1330,6 +1330,16 @@ class ContinualTrainer:
         if not self.ema_enabled:
             return
 
+        # Clean up previous teacher model to avoid memory leaks
+        if self.ema_teacher_model is not None:
+            # Move to CPU first to free GPU memory
+            self.ema_teacher_model.cpu()
+            # Delete the model
+            del self.ema_teacher_model
+            # Force GPU memory cleanup
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+
         # Create a deep copy of the model for the teacher
         import copy
 
