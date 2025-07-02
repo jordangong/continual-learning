@@ -197,6 +197,10 @@ class ContinualTrainer:
         self.ema_refresh_at_step_start = self.ema_config.get(
             "refresh_at_step_start", True
         )
+        self.ema_skip_names = self.ema_config.get(
+            "skip_names", ["classifier", "head", "fc"]
+        )
+        self.ema_momentum_overrides = self.ema_config.get("momentum_overrides", {})
         self.ema_teacher_model = None  # Will be initialized at the start of each step
 
     def _setup_optimizer(self) -> torch.optim.Optimizer:
@@ -1364,16 +1368,23 @@ class ContinualTrainer:
                 student_model.named_parameters(),
                 self.ema_teacher_model.named_parameters(),
             ):
-                # Skip classifier/head parameters - only update backbone
-                if any(
-                    skip_name in name.lower()
-                    for skip_name in ["classifier", "head", "fc"]
-                ):
+                # Skip parameters based on configurable skip names
+                if any(skip_name in name.lower() for skip_name in self.ema_skip_names):
                     continue
 
+                # Check for momentum override for this parameter
+                momentum = self.ema_momentum
+                for (
+                    override_name,
+                    override_momentum,
+                ) in self.ema_momentum_overrides.items():
+                    if override_name in name.lower():
+                        momentum = override_momentum
+                        break
+
                 # EMA update: teacher = momentum * teacher + (1 - momentum) * student
-                teacher_param.data.mul_(self.ema_momentum).add_(
-                    student_param.data, alpha=1 - self.ema_momentum
+                teacher_param.data.mul_(momentum).add_(
+                    student_param.data, alpha=1 - momentum
                 )
 
     def _replace_backbone_with_teacher(self):
