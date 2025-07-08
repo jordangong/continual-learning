@@ -170,8 +170,39 @@ def run_training(
                     f"\n=== Initializing prototypes for step {step + 1}/{num_steps} ==="
                 )
 
-            # Get the correct model reference
-            model_to_use = model.module if distributed else model
+            # Check if we should use pretrained model for prototype initialization
+            use_pretrained_for_prototypes = step != 0 and (
+                config["continual"]
+                .get("prototypical", {})
+                .get("init_with_pretrained", False)
+            )
+
+            if use_pretrained_for_prototypes:
+                # Only print on main process if distributed
+                if not distributed or (distributed and rank == 0):
+                    print("Using pretrained model for prototype initialization")
+
+                # Create a fresh pretrained model for prototype initialization
+                pretrained_model = create_model(
+                    model_config=config["model"],
+                    num_classes=config["dataset"]["num_classes"],
+                    device=device,
+                    cache_dir=cache_dir,
+                    continual_config=config["continual"],
+                )
+
+                # Wrap with DDP if distributed
+                if distributed:
+                    pretrained_model = torch.nn.parallel.DistributedDataParallel(
+                        pretrained_model, device_ids=[rank]
+                    )
+
+                model_to_use = (
+                    pretrained_model.module if distributed else pretrained_model
+                )
+            else:
+                # Use the current step model (existing behavior)
+                model_to_use = model.module if distributed else model
 
             # For incremental learning, only reset prototypes on the first step
             # This ensures we maintain prototypes for previous classes
@@ -198,7 +229,9 @@ def run_training(
             # Store original transform and temporarily replace with test transform
             original_transforms = []
             for dataset in temp_dataset:
-                assert hasattr(dataset, "transform"), f"Dataset {dataset} does not have a transform attribute"
+                assert hasattr(dataset, "transform"), (
+                    f"Dataset {dataset} does not have a transform attribute"
+                )
                 original_transforms.append(dataset.transform)
                 dataset.transform = data_module.test_transform
 
@@ -212,12 +245,58 @@ def run_training(
             )
 
             # Initialize prototypes using the temporary loader with test transforms
-            model_to_use.init_prototypes_from_data(temp_loader, reset=reset_prototypes)
+            if use_pretrained_for_prototypes:
+                # Extract features using pretrained model and transfer to main model
+                pretrained_features_list = []
+                pretrained_labels_list = []
+
+                model_to_use.eval()
+                with torch.no_grad():
+                    for batch_idx, (inputs, targets) in enumerate(temp_loader):
+                        inputs = inputs.to(device)
+                        targets = targets.to(device)
+
+                        # Extract features using pretrained model
+                        features = model_to_use.forward_features(inputs)
+                        pretrained_features_list.append(features.cpu())
+                        pretrained_labels_list.append(targets.cpu())
+
+                # Transfer prototypes to the main model
+                main_model = model.module if distributed else model
+
+                # Move features back to device and compute prototypes
+                features_device_list = []
+                labels_device_list = []
+
+                for features, labels in zip(
+                    pretrained_features_list, pretrained_labels_list
+                ):
+                    features_device = features.to(device)
+                    labels_device = labels.to(device)
+                    features_device_list.append(features_device)
+                    labels_device_list.append(labels_device)
+
+                # Compute prototypes on main model using pretrained features
+                main_model.compute_prototypes(
+                    features_device_list, labels_device_list, reset=reset_prototypes
+                )
+
+                # Clean up pretrained model to free memory
+                del pretrained_model
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+            else:
+                # Use existing behavior with current step model
+                model_to_use.init_prototypes_from_data(
+                    temp_loader, reset=reset_prototypes
+                )
 
             # Restore original transform
             if original_transforms:
-               for dataset, original in zip(temp_dataset, original_transforms):
-                    assert hasattr(dataset, "transform"), f"Dataset {dataset} does not have a transform attribute"
+                for dataset, original in zip(temp_dataset, original_transforms):
+                    assert hasattr(dataset, "transform"), (
+                        f"Dataset {dataset} does not have a transform attribute"
+                    )
                     dataset.transform = original
 
         # Train or evaluate on current step

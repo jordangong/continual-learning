@@ -40,6 +40,10 @@ continual:
   strategy: "finetune"         # Options: finetune, ewc, replay, zeroshot, prompt_tuning, ema etc.
   mask_logits: true            # Enable logit masking for non-current task classes, except replay samples
   entropy_prediction: false    # Enable entropy-based logit selection before prediction
+  
+  # Prototypical classifier parameters
+  prototypical:
+    init_with_pretrained: false  # Use pretrained model for prototype initialization instead of current step model
 
   # EMA parameters (used when strategy is "ema")
   ema:
