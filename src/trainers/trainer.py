@@ -496,13 +496,13 @@ class ContinualTrainer:
             if (epoch + 1) % self.training_config["eval_every"] == 0:
                 # Handle evaluation with teacher model during training
                 if self.ema_enabled and self.ema_eval_with_teacher:
-                    # Save current student backbone parameters before replacement
-                    self._save_student_backbone()
-                    # Temporarily replace backbone with teacher for evaluation
-                    self._replace_backbone_with_teacher()
+                    # Save current student parameters before replacement
+                    self._save_student_parameters()
+                    # Temporarily replace student with teacher
+                    self._replace_student_with_teacher()
                     test_loss, test_acc = self._evaluate(test_loader)
-                    # Restore original student backbone for continued training
-                    self._restore_student_backbone()
+                    # Restore original student parameters for continued training
+                    self._restore_student_parameters()
                 else:
                     test_loss, test_acc = self._evaluate(test_loader)
 
@@ -552,10 +552,10 @@ class ContinualTrainer:
 
         # Handle evaluation with teacher model
         if self.ema_enabled and self.ema_eval_with_teacher:
-            # Replace backbone with saved teacher AFTER loading checkpoint
+            # Replace student with saved teacher AFTER loading checkpoint
             # This uses the teacher from the same training iteration as the best checkpoint
-            self._replace_backbone_with_teacher()
-            print("Using EMA teacher backbone from best checkpoint for evaluation")
+            self._replace_student_with_teacher()
+            print("Using EMA teacher parameters from best checkpoint for evaluation")
 
         # Final evaluation
         _, final_acc = self._evaluate(test_loader)
@@ -575,11 +575,11 @@ class ContinualTrainer:
             fgt = forgetting(self.metrics["accuracy"], step)
             self.metrics["forgetting"].append(fgt)
 
-        # Replace backbone with EMA teacher at the end of the step
+        # Replace student parameters with EMA teacher at the end of the step
         # (Skip if already done for teacher evaluation)
         if self.ema_enabled and not self.ema_eval_with_teacher:
-            self._replace_backbone_with_teacher()
-            print(f"Replaced backbone with EMA teacher for step {step + 1}")
+            self._replace_student_with_teacher()
+            print(f"Replaced student parameters with EMA teacher for step {step + 1}")
 
         # Store EWC data if needed
         if (
@@ -1324,8 +1324,8 @@ class ContinualTrainer:
 
     def _initialize_ema_teacher(self):
         """
-        Initialize EMA teacher model as a copy of the current student model.
-        Only copies the backbone, not the classifier.
+        Initialize EMA teacher model as a deep copy of the student model.
+        Creates a complete copy with all parameters.
         """
         if not self.ema_enabled:
             return
@@ -1363,8 +1363,8 @@ class ContinualTrainer:
 
     def _update_ema_teacher(self):
         """
-        Update EMA teacher model with current student model weights.
-        Only updates the backbone, not the classifier.
+        Update EMA teacher model parameters with student model parameters.
+        Updates parameters based on skip_names configuration.
         """
         if not self.ema_enabled or self.ema_teacher_model is None:
             return
@@ -1397,10 +1397,10 @@ class ContinualTrainer:
                     student_param.data, alpha=1 - momentum
                 )
 
-    def _replace_backbone_with_teacher(self):
+    def _replace_student_with_teacher(self):
         """
-        Replace student backbone with teacher backbone at the end of a step.
-        Keeps the classifier unchanged.
+        Replace student parameters with teacher parameters based on skip configuration.
+        Only replaces parameters not in the skip_names list.
         """
         if not self.ema_enabled or self.ema_teacher_model is None:
             return
@@ -1408,27 +1408,27 @@ class ContinualTrainer:
         # Get the correct model reference (module if distributed)
         student_model = self.model.module if self.distributed else self.model
 
-        # Copy teacher backbone parameters to student
+        # Copy teacher parameters to student (respecting skip_names)
         with torch.no_grad():
             for (name, student_param), (_, teacher_param) in zip(
                 student_model.named_parameters(),
                 self.ema_teacher_model.named_parameters(),
             ):
-                # Skip classifier/head parameters - only replace backbone
+                # Skip parameters based on configurable skip names
                 if any(
                     skip_name in name.lower()
-                    for skip_name in ["classifier", "head", "fc"]
+                    for skip_name in self.ema_skip_names
                 ):
                     continue
 
                 # Copy teacher parameter to student
                 student_param.data.copy_(teacher_param.data)
 
-        print("Replaced student backbone with EMA teacher backbone")
+        print("Replaced student parameters with EMA teacher parameters (respecting skip_names)")
 
-    def _save_student_backbone(self):
+    def _save_student_parameters(self):
         """
-        Save current student backbone parameters for later restoration.
+        Save current student parameters for later restoration (respecting skip_names).
         Used for temporary teacher evaluation during training.
         """
         if not self.ema_enabled:
@@ -1437,33 +1437,33 @@ class ContinualTrainer:
         # Get the correct model reference (module if distributed)
         student_model = self.model.module if self.distributed else self.model
 
-        # Save backbone parameters (skip classifier/head)
-        self.student_backbone_backup = {}
+        # Save parameters (skip those in skip_names)
+        self.student_parameters_backup = {}
 
         for name, param in student_model.named_parameters():
-            # Only save backbone parameters
+            # Only save parameters not in skip_names
             if not any(
-                skip_name in name.lower() for skip_name in ["classifier", "head", "fc"]
+                skip_name in name.lower() for skip_name in self.ema_skip_names
             ):
-                self.student_backbone_backup[name] = param.data.clone()
+                self.student_parameters_backup[name] = param.data.clone()
 
-    def _restore_student_backbone(self):
+    def _restore_student_parameters(self):
         """
-        Restore previously saved student backbone parameters.
+        Restore previously saved student parameters (respecting skip_names).
         Used after temporary teacher evaluation during training.
         """
-        if not self.ema_enabled or not hasattr(self, "student_backbone_backup"):
+        if not self.ema_enabled or not hasattr(self, "student_parameters_backup"):
             return
 
         # Get the correct model reference (module if distributed)
         student_model = self.model.module if self.distributed else self.model
 
-        # Restore backbone parameters
+        # Restore saved parameters
         with torch.no_grad():
             for name, param in student_model.named_parameters():
-                # Only restore backbone parameters
-                if name in self.student_backbone_backup:
-                    param.data.copy_(self.student_backbone_backup[name])
+                # Only restore saved parameters
+                if name in self.student_parameters_backup:
+                    param.data.copy_(self.student_parameters_backup[name])
 
         # Clear backup to save memory
-        del self.student_backbone_backup
+        del self.student_parameters_backup
