@@ -203,6 +203,10 @@ class ContinualTrainer:
         self.ema_momentum_overrides = self.ema_config.get("momentum_overrides", {})
         self.ema_teacher_model = None  # Will be initialized at the start of each step
 
+        # Gradient norm accumulation for epoch-wise logging
+        self.grad_norm_accumulator = {}  # Dict to accumulate gradient norms by parameter name
+        self.grad_norm_batch_count = 0  # Count of batches for averaging
+
     def _setup_optimizer(self) -> torch.optim.Optimizer:
         """Setup optimizer based on configuration."""
         optimizer_config = self.config["optimizer"]
@@ -638,6 +642,9 @@ class ContinualTrainer:
         """
         self.model.train()
 
+        # Reset gradient norm accumulator at the start of each epoch
+        self._reset_gradient_norm_accumulator()
+
         total_loss = 0.0
         correct = 0
         total = 0
@@ -708,10 +715,18 @@ class ContinualTrainer:
                     # Unscale gradients before clipping
                     if self.gradient_clipping_enabled:
                         self.scaler.unscale_(self.optimizer)
+
+                        # Accumulate gradient norms after unscaling, before clipping
+                        self._accumulate_gradient_norms()
+
                         torch.nn.utils.clip_grad_norm_(
                             self.model.parameters(),
                             self.gradient_clipping_max_norm,
                         )
+                    else:
+                        # Unscale and accumulate gradient norms even without clipping
+                        self.scaler.unscale_(self.optimizer)
+                        self._accumulate_gradient_norms()
 
                     # Call optimizer.step() with scaler
                     self.scaler.step(self.optimizer)
@@ -725,6 +740,9 @@ class ContinualTrainer:
                 else:
                     # For bfloat16, regular backward pass is stable
                     loss.backward()
+
+                    # Accumulate gradient norms after backward, before clipping
+                    self._accumulate_gradient_norms()
 
                     # Apply gradient clipping if enabled
                     if self.gradient_clipping_enabled:
@@ -776,6 +794,9 @@ class ContinualTrainer:
 
                 # Backward pass
                 loss.backward()
+
+                # Accumulate gradient norms after backward, before clipping
+                self._accumulate_gradient_norms()
 
                 # Apply gradient clipping if enabled
                 if self.gradient_clipping_enabled:
@@ -999,6 +1020,10 @@ class ContinualTrainer:
                 )
 
             wandb.log(log_data, step=global_epoch)
+
+        # Log gradient norms if enabled
+        if self.logging_config.get("log_grad_norms", False):
+            self._log_gradient_norms(step, epoch)
 
     def _save_checkpoint(self, step: int, epoch: int, best: bool = False):
         """
@@ -1493,3 +1518,69 @@ class ContinualTrainer:
 
         # Clear backup to save memory
         del self.student_parameters_backup
+
+    def _reset_gradient_norm_accumulator(self):
+        """
+        Reset gradient norm accumulator at the start of each epoch.
+        """
+        self.grad_norm_accumulator = {}
+        self.grad_norm_batch_count = 0
+
+    def _accumulate_gradient_norms(self):
+        """
+        Accumulate gradient norms for the current batch.
+        Should be called after backward() and unscaling (if using mixed precision),
+        but before gradient clipping and optimizer.step().
+        """
+        if not self.logging_config.get("log_grad_norms", False):
+            return
+
+        model_to_use = self.model.module if self.distributed else self.model
+
+        # Accumulate gradient norms for each parameter
+        for name, param in model_to_use.named_parameters():
+            if param.grad is not None:
+                grad_norm = param.grad.data.norm(2).item()
+                clean_name = name.replace("module.", "")
+
+                if clean_name not in self.grad_norm_accumulator:
+                    self.grad_norm_accumulator[clean_name] = 0.0
+
+                self.grad_norm_accumulator[clean_name] += grad_norm
+
+        self.grad_norm_batch_count += 1
+
+    def _log_gradient_norms(self, step: int, epoch: int):
+        """
+        Log accumulated gradient norms for each parameter layer to tensorboard and wandb.
+        This logs the average gradient norms across all batches in the epoch.
+
+        Args:
+            step: Current continual learning step
+            epoch: Current epoch
+        """
+        # Only log on main process in distributed training
+        if self.distributed and self.local_rank != 0:
+            return
+
+        # Skip if no gradients were accumulated (shouldn't happen if logging is enabled)
+        if self.grad_norm_batch_count == 0:
+            return
+
+        # Compute global step for logging (same as other logging methods)
+        global_step = step * self.training_config["num_epochs"] + epoch
+
+        # Log average gradient norm for each parameter layer
+        for clean_name, accumulated_norm in self.grad_norm_accumulator.items():
+            # Compute average gradient norm across all batches in this epoch
+            avg_grad_norm = accumulated_norm / self.grad_norm_batch_count
+
+            # Log to tensorboard
+            if self.writer is not None:
+                self.writer.add_scalar(
+                    f"grad_norms/{clean_name}", avg_grad_norm, global_step
+                )
+
+            # Log to wandb
+            if self.logging_config.get("wandb", False):
+                wandb.log({f"grad_norms/{clean_name}": avg_grad_norm}, step=global_step)

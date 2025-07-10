@@ -96,6 +96,7 @@ logging:
   wandb: true                  # Enable Weights & Biases logging
   wandb_project: "continual-learning"
   wandb_entity: null           # Set to your wandb username or team name
+  log_grad_norms: false        # Log gradient norms for each parameter layer
 
 # Path configuration
 paths:
