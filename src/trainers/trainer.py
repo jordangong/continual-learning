@@ -217,33 +217,62 @@ class ContinualTrainer:
         backbone_lr_multiplier = optimizer_config.get("backbone_lr_multiplier", 1.0)
         prompt_lr_multiplier = optimizer_config.get("prompt_lr_multiplier", 1.0)
 
-        # Create parameter groups with different learning rates if multiplier is not 1.0
-        if backbone_lr_multiplier != 1.0 or prompt_lr_multiplier != 1.0:
-            backbone_params = []
-            prompt_params = []
-            other_params = []
+        # Separate parameters by type to handle weight decay properly
+        backbone_params = []
+        prompt_params = []
+        classifier_params = []
+        other_params = []
 
-            # Separate backbone parameters from other parameters
-            for name, param in model_to_use.named_parameters():
-                if "backbone" in name:
-                    backbone_params.append(param)
-                elif "prompt" in name:
-                    prompt_params.append(param)
-                else:
-                    other_params.append(param)
+        # Separate all parameters by type
+        for name, param in model_to_use.named_parameters():
+            if "backbone" in name:
+                backbone_params.append(param)
+            elif "prompt" in name:
+                prompt_params.append(param)
+            elif "classifier" in name:
+                # Exclude classifier from weight decay to prevent previous task weights from changing
+                classifier_params.append(param)
+            else:
+                other_params.append(param)
 
-            # Create parameter groups with different learning rates
-            param_groups = [
-                {"params": backbone_params, "lr": lr * backbone_lr_multiplier},
-                {"params": other_params},
-            ]
-            if prompt_params:
-                param_groups.append(
-                    {"params": prompt_params, "lr": lr * prompt_lr_multiplier}
-                )
-        else:
-            # Use all parameters with the same learning rate
-            param_groups = model_to_use.parameters()
+        # Create parameter groups with different settings
+        param_groups = []
+
+        # Backbone parameters with optional learning rate multiplier
+        if backbone_params:
+            param_groups.append(
+                {
+                    "params": backbone_params,
+                    "lr": lr * backbone_lr_multiplier,
+                    "weight_decay": weight_decay,
+                }
+            )
+
+        # Prompt parameters with optional learning rate multiplier
+        if prompt_params:
+            param_groups.append(
+                {
+                    "params": prompt_params,
+                    "lr": lr * prompt_lr_multiplier,
+                    "weight_decay": weight_decay,
+                }
+            )
+
+        # Classifier parameters WITHOUT weight decay
+        if classifier_params:
+            param_groups.append(
+                {
+                    "params": classifier_params,
+                    "lr": lr,
+                    "weight_decay": 0.0,  # No weight decay for classifier
+                }
+            )
+
+        # Other parameters with standard settings
+        if other_params:
+            param_groups.append(
+                {"params": other_params, "lr": lr, "weight_decay": weight_decay}
+            )
 
         if optimizer_name == "adam":
             return optim.Adam(
@@ -1415,16 +1444,15 @@ class ContinualTrainer:
                 self.ema_teacher_model.named_parameters(),
             ):
                 # Skip parameters based on configurable skip names
-                if any(
-                    skip_name in name.lower()
-                    for skip_name in self.ema_skip_names
-                ):
+                if any(skip_name in name.lower() for skip_name in self.ema_skip_names):
                     continue
 
                 # Copy teacher parameter to student
                 student_param.data.copy_(teacher_param.data)
 
-        print("Replaced student parameters with EMA teacher parameters (respecting skip_names)")
+        print(
+            "Replaced student parameters with EMA teacher parameters (respecting skip_names)"
+        )
 
     def _save_student_parameters(self):
         """
@@ -1442,9 +1470,7 @@ class ContinualTrainer:
 
         for name, param in student_model.named_parameters():
             # Only save parameters not in skip_names
-            if not any(
-                skip_name in name.lower() for skip_name in self.ema_skip_names
-            ):
+            if not any(skip_name in name.lower() for skip_name in self.ema_skip_names):
                 self.student_parameters_backup[name] = param.data.clone()
 
     def _restore_student_parameters(self):
