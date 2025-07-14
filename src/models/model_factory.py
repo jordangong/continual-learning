@@ -159,9 +159,12 @@ class ClassifierHead(nn.Module):
         super().__init__()
         self.classifier_type = classifier_type
         if learnable_temperature:
-            self.temperature = nn.Parameter(torch.tensor(temperature))
+            # Store temperature in log space for better optimization stability
+            self.log_temperature = nn.Parameter(torch.log(torch.tensor(temperature)))
+            self.learnable_temperature = True
         else:
             self.temperature = temperature
+            self.learnable_temperature = False
 
         if classifier_type == "linear":
             self.classifier = nn.Linear(in_features, num_classes)
@@ -185,7 +188,12 @@ class ClassifierHead(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Forward pass with temperature scaling."""
         logits = self.classifier(x)
-        return logits / self.temperature
+        if self.learnable_temperature:
+            # Convert log_temperature back to actual temperature using exp
+            temperature = torch.exp(self.log_temperature)
+        else:
+            temperature = self.temperature
+        return logits / temperature
 
     def update_prototypes(self, features: torch.Tensor, labels: torch.Tensor) -> None:
         """Update prototypes if using prototypical classifier."""
