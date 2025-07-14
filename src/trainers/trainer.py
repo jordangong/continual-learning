@@ -217,14 +217,16 @@ class ContinualTrainer:
         # Get the correct model reference (module if distributed)
         model_to_use = self.model.module if self.distributed else self.model
 
-        # Get backbone and prompt learning rate multiplier from optimizer config
+        # Get backbone, prompt, and temperature learning rate multipliers from optimizer config
         backbone_lr_multiplier = optimizer_config.get("backbone_lr_multiplier", 1.0)
         prompt_lr_multiplier = optimizer_config.get("prompt_lr_multiplier", 1.0)
+        temperature_lr_multiplier = optimizer_config.get("temperature_lr_multiplier", 1.0)
 
         # Separate parameters by type to handle weight decay properly
         backbone_params = []
         prompt_params = []
         classifier_params = []
+        temperature_params = []
         other_params = []
 
         # Separate all parameters by type
@@ -236,6 +238,9 @@ class ContinualTrainer:
             elif "classifier" in name:
                 # Exclude classifier from weight decay to prevent previous task weights from changing
                 classifier_params.append(param)
+            elif "temperature" in name:
+                # Temperature parameters with separate learning rate
+                temperature_params.append(param)
             else:
                 other_params.append(param)
 
@@ -269,6 +274,16 @@ class ContinualTrainer:
                     "params": classifier_params,
                     "lr": lr,
                     "weight_decay": 0.0,  # No weight decay for classifier
+                }
+            )
+
+        # Temperature parameters with optional learning rate multiplier and no weight decay
+        if temperature_params:
+            param_groups.append(
+                {
+                    "params": temperature_params,
+                    "lr": lr * temperature_lr_multiplier,
+                    "weight_decay": 0.0,  # No weight decay for temperature parameters
                 }
             )
 
