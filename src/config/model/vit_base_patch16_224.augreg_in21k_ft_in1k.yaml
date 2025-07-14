@@ -13,6 +13,7 @@ classifier:
   normalize: false
   temperature: 1.0
   learnable_temperature: false
+  use_log_temperature: false  # Whether to parameterize temperature in log space for better optimization stability
 sae:
   use_sae: false
   checkpoint_path: "/path/to/your/sae_checkpoint.pt"

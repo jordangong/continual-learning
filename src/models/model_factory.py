@@ -145,6 +145,7 @@ class ClassifierHead(nn.Module):
         temperature: float = 1.0,
         normalize: bool = True,
         learnable_temperature: bool = False,
+        use_log_temperature: bool = False,
     ):
         """
         Args:
@@ -155,16 +156,20 @@ class ClassifierHead(nn.Module):
             dropout: Dropout probability
             temperature: Temperature scaling parameter for logits
             learnable_temperature: Whether the temperature should be a learnable parameter
+            use_log_temperature: If learnable_temperature=True, whether to parameterize in log space for stability
         """
         super().__init__()
         self.classifier_type = classifier_type
+        self.use_log_temperature = use_log_temperature
         if learnable_temperature:
-            # Store temperature in log space for better optimization stability
-            self.log_temperature = nn.Parameter(torch.log(torch.tensor(temperature)))
-            self.learnable_temperature = True
+            if use_log_temperature:
+                # Store temperature in log space for better optimization stability
+                self.log_temperature = nn.Parameter(torch.log(torch.tensor(temperature)))
+            else:
+                # Store temperature directly
+                self.temperature = nn.Parameter(torch.tensor(temperature))
         else:
             self.temperature = temperature
-            self.learnable_temperature = False
 
         if classifier_type == "linear":
             self.classifier = nn.Linear(in_features, num_classes)
@@ -188,10 +193,11 @@ class ClassifierHead(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Forward pass with temperature scaling."""
         logits = self.classifier(x)
-        if self.learnable_temperature:
+        if self.use_log_temperature:
             # Convert log_temperature back to actual temperature using exp
             temperature = torch.exp(self.log_temperature)
         else:
+            # Use temperature parameter directly
             temperature = self.temperature
         return logits / temperature
 
@@ -280,6 +286,7 @@ class PretrainedModel(nn.Module):
         temperature = classifier_config.get("temperature", 1.0)
         normalize = classifier_config.get("normalize", False)
         learnable_temperature = classifier_config.get("learnable_temperature", False)
+        use_log_temperature = classifier_config.get("use_log_temperature", False)
 
         self.classifier = ClassifierHead(
             in_features=self.feature_dim,
@@ -290,6 +297,7 @@ class PretrainedModel(nn.Module):
             temperature=temperature,
             normalize=normalize,
             learnable_temperature=learnable_temperature,
+            use_log_temperature=use_log_temperature,
         )
 
         # Freeze classifier if specified

@@ -14,6 +14,7 @@ classifier:
   normalize: false
   temperature: 1.0  # Temperature scaling parameter for logits (lower values make predictions more confident)
   learnable_temperature: false  # Whether to make temperature a learnable parameter
+  use_log_temperature: false  # Whether to parameterize temperature in log space for better optimization stability
 sae:
   use_sae: false
   checkpoint_path: "/path/to/your/sae_checkpoint.pt"
