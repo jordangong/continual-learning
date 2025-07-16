@@ -54,6 +54,14 @@ continual:
     skip_names: ["classifier", "head", "fc"]  # Parameter names to skip during EMA updates
     momentum_overrides: {}     # Override momentum for specific parameter names (e.g., {"classifier": 0.9})
 
+  # Classifier calibration parameters
+  calibration:
+    enabled: false             # Enable classifier calibration for continual learning
+    classifier_as_prototype: true # Use classifier as prototype for calibration
+    eval_with_calibration: true # Apply calibration during training evaluation (temporary)
+    method: "rigid"             # Calibration method: "rigid", "affine", or "nonlinear"
+    regularization_weight: 0.01 # Regularization weight for nonlinear transform (L2 penalty)
+
   # Prompt tuning parameters (used when strategy is "prompt_tuning")
   prompt_tuning:
     prompt_length: 10            # Number of prompt tokens

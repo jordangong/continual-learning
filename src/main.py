@@ -118,19 +118,20 @@ def run_training(
         continual_config=config["continual"],
     )
 
+    # Setup data module
+    data_module = DataModule(
+        config,
+        model_normalization_mean=pretrained_model_mean,
+        model_normalization_std=pretrained_model_std,
+    )
+
     # Setup trainer with distributed info if applicable
     trainer = ContinualTrainer(
         model=model,
         config=config,
         device=device,
         local_rank=rank if distributed else -1,
-    )
-
-    # Setup data module
-    data_module = DataModule(
-        config,
-        model_normalization_mean=pretrained_model_mean,
-        model_normalization_std=pretrained_model_std,
+        data_module=data_module,
     )
 
     # Train or evaluate on each step
@@ -142,6 +143,7 @@ def run_training(
     if eval_only and not distributed or (eval_only and distributed and rank == 0):
         print("Running in evaluation-only mode. Loading model from checkpoint...")
 
+    all_step_classes = []
     for step in range(num_steps):
         # Get data loaders for current step
         memory_data = data_module.get_memory_samples(step) if step > 0 else None
@@ -152,6 +154,7 @@ def run_training(
             rank=rank,
             world_size=world_size,
         )
+        all_step_classes.append(step_classes)
 
         # Apply debug settings to limit data loaders if enabled
         train_loader, test_loader = data_module.limit_data_loaders(
@@ -322,7 +325,7 @@ def run_training(
                 )
         else:
             # Train as usual
-            metrics = trainer.train_step(step, step_classes, train_loader, test_loader)
+            metrics = trainer.train_step(step, all_step_classes, train_loader, test_loader)
             train_time = time.time() - start_time
             if not distributed or (distributed and rank == 0):
                 print(

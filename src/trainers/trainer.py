@@ -1,6 +1,6 @@
 import glob
 import os
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import torch
 import torch.distributed as dist
@@ -25,6 +25,7 @@ class ContinualTrainer:
         config: Dict[str, Any],
         device: torch.device,
         local_rank: int = -1,
+        data_module=None,
     ):
         """
         Args:
@@ -32,11 +33,13 @@ class ContinualTrainer:
             config: Configuration dictionary
             device: Device to train on
             local_rank: Local rank for distributed training (-1 for non-distributed)
+            data_module: Data module for accessing test transforms
         """
         self.model = model
         self.config = config
         self.device = device
         self.local_rank = local_rank
+        self.data_module = data_module
         self.distributed = local_rank != -1
 
         # Move model to device
@@ -58,11 +61,23 @@ class ContinualTrainer:
         # Entropy prediction configuration
         self.entropy_prediction = self.continual_config.get("entropy_prediction", False)
 
-        # Class tracking for logit masking
+        # Class tracking for logit masking and calibration
         self.current_task_classes = None  # Classes in current step
 
         # Debug configuration
         self.debug_config = config.get("debug", {"enabled": False})
+
+        # Classifier calibration configuration
+        self.calibration_config = self.continual_config.get("calibration", {"enabled": False})
+        self.calibration_enabled = self.calibration_config.get("enabled", False)
+        self.calibration_classifier_as_prototype = self.calibration_config.get("classifier_as_prototype", False)
+        self.calibration_eval_with_calibration = self.calibration_config.get("eval_with_calibration", False)
+        self.calibration_method = self.calibration_config.get("method", "rigid")  # rigid, affine, nonlinear
+        self.calibration_reg_weight = self.calibration_config.get("regularization_weight", 0.01)
+
+        # Storage for historical prototypes and checkpoint paths for calibration
+        self.historical_prototypes = {}  # Format: {step: {class_idx: prototype}}
+        self.historical_checkpoint_paths = {}  # Format: {step: checkpoint_path}
 
         # Gradient clipping configuration
         self.gradient_clipping_enabled = self.training_config.get(
@@ -443,7 +458,7 @@ class ContinualTrainer:
     def train_step(
         self,
         step: int,
-        step_classes: List[int],
+        all_step_classes: List[List[int]],
         train_loader: DataLoader,
         test_loader: DataLoader,
     ) -> Dict[str, float]:
@@ -452,6 +467,7 @@ class ContinualTrainer:
 
         Args:
             step: Current continual learning step
+            all_step_classes: Classes in all steps
             train_loader: Training data loader
             test_loader: Test data loader
 
@@ -467,29 +483,23 @@ class ContinualTrainer:
         # Reset frequency tracking for L2P-style diversity regularization at the start of each new task
         if hasattr(self.model, "reset_frequency_tracking"):
             self.model.reset_frequency_tracking()
-            if debug_enabled:
-                print(f"{debug_prefix}Reset frequency tracking for step {step + 1}")
+            print(f"{debug_prefix}Reset frequency tracking for step {step + 1}")
 
-        # Set current task classes for logit masking
-        if self.mask_logits:
-            self.current_task_classes = set(step_classes)
+        # Set current task classes for logit masking and calibration
+        if self.mask_logits or self.calibration_enabled:
+            self.current_task_classes = all_step_classes[step]
 
         # Initialize EMA teacher model at the start of each step (conditionally)
         if self.ema_enabled:
             # Always initialize for the first step, or if refresh_at_step_start is enabled
             if step == 0 or self.ema_refresh_at_step_start:
                 self._initialize_ema_teacher()
-                if debug_enabled:
-                    if step == 0:
-                        print(f"{debug_prefix}Initialized EMA teacher for first step")
-                    else:
-                        print(
-                            f"{debug_prefix}Refreshed EMA teacher at step start {step + 1}"
-                        )
-            elif debug_enabled:
-                print(
-                    f"{debug_prefix}Skipped EMA teacher refresh at step start {step + 1} (using refresh_interval instead)"
-                )
+                if step == 0:
+                    print(f"{debug_prefix}Initialized EMA teacher for first step")
+                else:
+                    print(f"{debug_prefix}Refreshed EMA teacher at step start {step + 1}")
+            else:
+                print(f"{debug_prefix}Skipped EMA teacher refresh at step start {step + 1} (using refresh_interval instead)")
 
         # Apply debug settings if enabled
         if debug_enabled and self.debug_config.get("fast_dev_run", False):
@@ -511,9 +521,7 @@ class ContinualTrainer:
             self.scheduler = self._setup_scheduler()
 
             if not self.distributed or (self.distributed and self.local_rank == 0):
-                print(
-                    f"Initialized new optimizer and scheduler for step {step + 1}/{self.continual_config['num_steps']}"
-                )
+                print(f"Initialized new optimizer and scheduler for step {step + 1}/{self.continual_config['num_steps']}")
         else:
             # For global scheduler, only initialize once or update with current step
             if self.scheduler is None:
@@ -537,22 +545,49 @@ class ContinualTrainer:
                 and (epoch + 1) % self.ema_refresh_interval == 0
             ):
                 self._initialize_ema_teacher()
-                if debug_enabled:
-                    print(f"{debug_prefix}Refreshed EMA teacher at epoch {epoch + 1}")
+                print(f"{debug_prefix}Refreshed EMA teacher at epoch {epoch + 1}")
 
             # Evaluate if needed
             if (epoch + 1) % self.training_config["eval_every"] == 0:
-                # Handle evaluation with teacher model during training
-                if self.ema_enabled and self.ema_eval_with_teacher:
-                    # Save current student parameters before replacement
-                    self._save_student_parameters()
-                    # Temporarily replace student with teacher
-                    self._replace_student_with_teacher()
-                    test_loss, test_acc = self._evaluate(test_loader)
-                    # Restore original student parameters for continued training
-                    self._restore_student_parameters()
+                # Handle calibration during training evaluation
+                if self.calibration_enabled and self.calibration_eval_with_calibration and step > 0:
+                    # Save current classifier state before temporary calibration
+                    original_classifier_state = self._save_classifier_state()
+                    print(f"{debug_prefix}Applying temporary calibration for training evaluation")
+
+                    try:
+                        # Handle evaluation with teacher model if also enabled
+                        if self.ema_enabled and self.ema_eval_with_teacher:
+                            # Save current student parameters before replacement
+                            self._save_student_parameters()
+                            # Temporarily replace student with teacher
+                            self._replace_student_with_teacher()
+                            # Apply calibration to previous classifiers for evaluation
+                            self.calibrate_previous_classifiers(step, train_loader, all_step_classes)
+                            test_loss, test_acc = self._evaluate(test_loader)
+                            # Restore original student parameters for continued training
+                            self._restore_student_parameters()
+                        else:
+                            # Apply calibration to previous classifiers for evaluation
+                            self.calibrate_previous_classifiers(step, train_loader, all_step_classes)
+                            test_loss, test_acc = self._evaluate(test_loader)
+                    finally:
+                        # Always restore original classifier state after evaluation
+                        self._restore_classifier_state(original_classifier_state)
+                        print(f"{debug_prefix}Restored original classifier weights after evaluation")
                 else:
-                    test_loss, test_acc = self._evaluate(test_loader)
+                    # Standard evaluation without calibration
+                    # Handle evaluation with teacher model during training
+                    if self.ema_enabled and self.ema_eval_with_teacher:
+                        # Save current student parameters before replacement
+                        self._save_student_parameters()
+                        # Temporarily replace student with teacher
+                        self._replace_student_with_teacher()
+                        test_loss, test_acc = self._evaluate(test_loader)
+                        # Restore original student parameters for continued training
+                        self._restore_student_parameters()
+                    else:
+                        test_loss, test_acc = self._evaluate(test_loader)
 
                 # Log metrics
                 self._log_metrics(
@@ -604,6 +639,10 @@ class ContinualTrainer:
             # This uses the teacher from the same training iteration as the best checkpoint
             self._replace_student_with_teacher()
             print("Using EMA teacher parameters from best checkpoint for evaluation")
+
+        # Apply classifier calibration if enabled
+        if self.calibration_enabled:
+            self.calibrate_previous_classifiers(step, train_loader, all_step_classes)
 
         # Final evaluation
         _, final_acc = self._evaluate(test_loader)
@@ -1513,7 +1552,7 @@ class ContinualTrainer:
             if not any(skip_name in name.lower() for skip_name in self.ema_skip_names):
                 self.student_parameters_backup[name] = param.data.clone()
 
-    def _restore_student_parameters(self):
+    def _restore_student_parameters(self) -> None:
         """
         Restore previously saved student parameters (respecting skip_names).
         Used after temporary teacher evaluation during training.
@@ -1533,6 +1572,538 @@ class ContinualTrainer:
 
         # Clear backup to save memory
         del self.student_parameters_backup
+
+    def _save_classifier_state(self) -> Dict[str, torch.Tensor]:
+        """
+        Save current classifier weights for temporary calibration during evaluation.
+        
+        Returns:
+            Dictionary mapping classifier parameter names to tensor values
+        """
+        model = self.model.module if hasattr(self.model, "module") else self.model
+        classifier_state = {}
+        
+        # Save classifier weights (including prototypes)
+        for name, param in model.named_parameters():
+            if "classifier" in name:
+                classifier_state[name] = param.data.clone()
+        
+        return classifier_state
+
+    def _restore_classifier_state(self, classifier_state: Dict[str, torch.Tensor]) -> None:
+        """
+        Restore classifier weights from saved state.
+        
+        Args:
+            classifier_state: Dictionary mapping classifier parameter names to tensor values
+        """
+        model = self.model.module if hasattr(self.model, "module") else self.model
+        
+        for name, param in model.named_parameters():
+            if name in classifier_state:
+                param.data.copy_(classifier_state[name])
+
+    def _store_task_prototypes(
+        self,
+        step: int,
+        task_prototypes: Dict[int, torch.Tensor],
+    ):
+        """
+        Store prototypes and checkpoint path for current task to enable future calibration.
+
+        Args:
+            step: Current continual learning step
+            task_prototypes: Prototypes extracted with current step backbone
+        """
+        if not self.calibration_enabled:
+            return
+
+        # Store prototypes
+        self.historical_prototypes[step] = {cid: proto.clone().detach() for cid, proto in task_prototypes.items()}
+
+        # Store checkpoint path for loading backbone state when needed
+        experiment_name = self.config["experiment"]["name"]
+        experiment_checkpoint_dir = os.path.join(self.checkpoint_dir, experiment_name)
+        checkpoint_path = os.path.join(experiment_checkpoint_dir, f"step{step}_best.pth")
+        self.historical_checkpoint_paths[step] = checkpoint_path
+
+        if self.distributed and self.local_rank == 0:
+            print(f"Stored prototypes and checkpoint path for step {step} for future calibration")
+
+    def _compute_rigid_transform(
+        self, source: torch.Tensor, target: torch.Tensor
+    ) -> Dict[str, torch.Tensor]:
+        """
+        Compute rigid transformation (rotation + translation) from source to target prototypes.
+
+        Args:
+            source: Source prototypes [num_classes, features]
+            target: Target prototypes [num_classes, features]
+
+        Returns:
+            Dict containing rotation matrix and translation vector
+        """
+        # Center the point sets
+        source_mean = source.mean(dim=0, keepdim=True)
+        target_mean = target.mean(dim=0, keepdim=True)
+
+        source_centered = source - source_mean
+        target_centered = target - target_mean
+
+        # Compute rotation using SVD (Procrustes analysis)
+        # H = source_centered.T @ target_centered
+        H = torch.matmul(source_centered.T, target_centered)
+        U, S, Vt = torch.svd(H)
+
+        # Compute rotation matrix
+        R = torch.matmul(Vt.T, U.T)
+
+        # Ensure proper rotation (det(R) = 1)
+        if torch.det(R) < 0:
+            Vt[-1, :] *= -1
+            R = torch.matmul(Vt.T, U.T)
+
+        # Compute translation
+        t = target_mean - torch.matmul(source_mean, R.T)
+
+        return {"rotation": R, "translation": t.squeeze(0)}
+
+    def _compute_affine_transform(
+        self, source: torch.Tensor, target: torch.Tensor
+    ) -> Dict[str, torch.Tensor]:
+        """
+        Compute affine transformation (linear map + translation) from source to target prototypes.
+
+        Args:
+            source: Source prototypes [num_classes, features]
+            target: Target prototypes [num_classes, features]
+
+        Returns:
+            Dict containing transformation matrix and translation vector
+        """
+        # Add bias term for affine transformation
+        # Solve: target = source @ A + b
+        # This is equivalent to: target = [source, 1] @ [A; b]
+
+        num_classes, num_features = source.shape
+
+        # Add column of ones for bias term
+        source_aug = torch.cat(
+            [source, torch.ones(num_classes, 1, device=source.device)], dim=1
+        )
+
+        # Solve least squares: source_aug @ transform = target
+        # transform = (source_aug.T @ source_aug)^-1 @ source_aug.T @ target
+        try:
+            transform = torch.linalg.solve(
+                torch.matmul(source_aug.T, source_aug),
+                torch.matmul(source_aug.T, target),
+            )
+        except torch.linalg.LinAlgError:
+            # Fallback to pseudo-inverse if singular
+            transform = torch.linalg.pinv(source_aug) @ target
+
+        # Extract linear transformation and translation
+        linear_transform = transform[:-1, :]
+        translation = transform[-1, :]
+
+        return {"linear": linear_transform, "translation": translation}
+
+    def _compute_nonlinear_transform(
+        self, source: torch.Tensor, target: torch.Tensor
+    ) -> Callable:
+        """
+        Compute nonlinear transformation using neural network from source to target prototypes.
+
+        Args:
+            source: Source prototypes [num_classes, features]
+            target: Target prototypes [num_classes, features]
+
+        Returns:
+            Trained transformation function
+        """
+        num_features = source.shape[1]
+
+        # Create a simple MLP for nonlinear transformation
+        class TransformNet(nn.Module):
+            def __init__(self, input_dim, hidden_dim=None):
+                super().__init__()
+                if hidden_dim is None:
+                    hidden_dim = max(input_dim // 2, 64)
+
+                self.net = nn.Sequential(
+                    nn.Linear(input_dim, hidden_dim),
+                    nn.ReLU(),
+                    nn.Linear(hidden_dim, hidden_dim),
+                    nn.ReLU(),
+                    nn.Linear(hidden_dim, input_dim),
+                )
+
+            def forward(self, x):
+                return self.net(x)
+
+        # Initialize and train the transformation network
+        transform_net = TransformNet(num_features).to(source.device)
+        optimizer = torch.optim.Adam(transform_net.parameters(), lr=0.001)
+        criterion = nn.MSELoss()
+
+        # Training loop
+        transform_net.train()
+        for epoch in range(100):  # Quick training
+            optimizer.zero_grad()
+            pred = transform_net(source)
+            loss = criterion(pred, target)
+
+            # Add regularization to prevent overfitting
+            reg_loss = 0
+            for param in transform_net.parameters():
+                reg_loss += param.norm(2)
+            loss += self.calibration_reg_weight * reg_loss
+
+            loss.backward()
+            optimizer.step()
+
+            if epoch % 20 == 0 and self.distributed and self.local_rank == 0:
+                print(f"Calibration training epoch {epoch}, loss: {loss.item():.6f}")
+
+        transform_net.eval()
+        return transform_net
+
+    def _apply_calibration_transform(
+        self, prototypes: torch.Tensor, transform_params: Dict, method: str
+    ) -> torch.Tensor:
+        """
+        Apply calibration transformation to prototypes.
+
+        Args:
+            prototypes: Prototypes to transform [num_classes, features]
+            transform_params: Transformation parameters
+            method: Transformation method ('rigid', 'affine', 'nonlinear')
+
+        Returns:
+            Transformed prototypes
+        """
+        if method == "rigid":
+            # Apply rigid transformation: R @ p + t
+            return (
+                torch.matmul(prototypes, transform_params["rotation"].T)
+                + transform_params["translation"]
+            )
+
+        elif method == "affine":
+            # Apply affine transformation: p @ A + b
+            return (
+                torch.matmul(prototypes, transform_params["linear"])
+                + transform_params["translation"]
+            )
+
+        elif method == "nonlinear":
+            # Apply nonlinear transformation using trained network
+            with torch.no_grad():
+                return transform_params(prototypes)
+
+        else:
+            raise ValueError(f"Unknown calibration method: {method}")
+
+    def _calibrate_previous_classifiers(
+        self, current_step: int, train_loader: DataLoader, all_step_classes: List[List[int]]
+    ):
+        """
+        Calibrate all previous task classifiers by computing a transformation
+        from current task prototypes (with previous backbone) to current task prototypes
+        (with current backbone) and applying the transformation to previous task prototypes.
+
+        This measures backbone drift and helps maintain alignment between previous
+        task classifiers and the evolved backbone after training on new tasks.
+
+        Args:
+            current_step: The current continual learning step
+            train_loader: Training data loader for current task
+            all_step_classes: List of lists of classes seen so far
+        """
+        if not self.calibration_enabled or current_step <= 0:
+            return
+
+        if self.distributed and self.local_rank == 0:
+            print(f"\n=== Calibrating previous classifiers at step {current_step} ===")
+
+        # Get model reference
+        model_to_use = self.model.module if self.distributed else self.model
+
+        # Check if we have a prototypical classifier
+        if not hasattr(model_to_use, "classifier") or not hasattr(
+            model_to_use.classifier, "classifier"
+        ):
+            print("Warning: No prototypical classifier found for calibration")
+            return
+
+        classifier = model_to_use.classifier.classifier
+        if not hasattr(classifier, "prototypes"):
+            print("Warning: Classifier does not have prototypes for calibration")
+            return
+
+        # Get current task prototypes
+        if current_step not in self.historical_prototypes:
+            print(f"Warning: No historical prototypes found for step {current_step}")
+            return
+
+        current_task_prototypes = self.historical_prototypes[current_step]
+
+        # We need at least one previous step to compute calibration transform
+        if current_step <= 0:
+            return
+
+        # Use most recent previous step's backbone to compute current task prototypes
+        # This measures how the current task prototypes changed due to backbone evolution
+        reference_step = current_step - 1
+        if reference_step not in self.historical_checkpoint_paths:
+            print(f"Warning: No reference checkpoint found for step {reference_step}")
+            return
+
+        # Compute current task prototypes using previous backbone from checkpoint
+        previous_checkpoint_path = self.historical_checkpoint_paths[reference_step]
+        reference_task_prototypes = self._extract_prototypes_with_backbone(
+            train_loader, previous_checkpoint_path
+        )
+
+        # Convert prototypes to tensors
+        reference_task_prototypes = torch.stack(tuple(reference_task_prototypes.values()))
+        current_task_prototypes = torch.stack(tuple(current_task_prototypes.values()))
+
+        # Compute transformation from current task prototypes (with previous backbone) to current task prototypes (with current backbone)
+        # This measures the backbone drift for the current task
+        if self.calibration_method == "rigid":
+            transform_params = self._compute_rigid_transform(
+                reference_task_prototypes, current_task_prototypes
+            )
+        elif self.calibration_method == "affine":
+            transform_params = self._compute_affine_transform(
+                reference_task_prototypes, current_task_prototypes
+            )
+        elif self.calibration_method == "nonlinear":
+            transform_params = self._compute_nonlinear_transform(
+                reference_task_prototypes, current_task_prototypes
+            )
+        else:
+            raise ValueError(f"Unknown calibration method: {self.calibration_method}")
+
+        # Apply calibration to all previous task classifiers
+        num_calibrated = 0
+        with torch.no_grad():
+            for step in range(current_step):
+                if step in self.historical_prototypes:
+                    # Get the classes for this step
+                    class_indices = all_step_classes[step]
+
+                    # Get the actual prototypes used by this previous task (after its training)
+                    original_prototypes = self.historical_prototypes[step]
+                    original_prototypes = torch.stack(tuple(original_prototypes.values()))
+
+                    # Apply calibration transform
+                    calibrated_prototypes = self._apply_calibration_transform(
+                        original_prototypes, transform_params, self.calibration_method
+                    )
+
+                    # Update the classifier prototypes
+                    classifier.prototypes.data[class_indices] = calibrated_prototypes
+
+                    num_calibrated += 1
+
+                    if self.distributed and self.local_rank == 0:
+                        print(f"Calibrated prototypes for step {step}")
+
+        if self.distributed and self.local_rank == 0:
+            print(f"Successfully calibrated {num_calibrated} previous task classifiers using {self.calibration_method} method")
+
+    def _extract_prototypes_with_backbone(
+        self, train_loader: DataLoader, checkpoint_path: str=None
+    ) -> Dict[int, torch.Tensor]:
+        """
+        Compute current task prototypes using backbone from checkpoint.
+        If checkpoint_path is None, use current backbone.
+        Uses test transforms for clean, non-augmented features.
+
+        Args:
+            train_loader: Training data loader for current task
+            checkpoint_path: Path to checkpoint
+
+        Returns:
+            Prototypes computed with backbone from checkpoint
+        """
+        model_to_use = self.model.module if self.distributed else self.model
+
+        # Load checkpoint
+        if checkpoint_path is not None:
+            if not os.path.exists(checkpoint_path):
+                raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
+
+            checkpoint = torch.load(checkpoint_path, map_location=self.device)
+            previous_model_state = checkpoint["model"]
+
+        # Use test transforms for clean prototype extraction
+        if self.data_module is None:
+            print(
+                "Warning: data_module not available for test transforms, "
+                "using training transforms for prototype extraction"
+            )
+            temp_loader = train_loader
+        else:
+            # Initialize prototypes from training data but with test transforms
+            # Create a temporary data loader with test transforms for prototype initialization
+            # This ensures consistent feature extraction without augmentations
+            temp_dataset = []
+            dataset = train_loader.dataset
+            # Handle nested datasets (e.g., Subsets, Concatenated datasets)
+            while True:
+                if hasattr(dataset, "dataset"):
+                    dataset = dataset.dataset
+                elif hasattr(dataset, "datasets"):
+                    dataset = dataset.datasets
+                else:
+                    if isinstance(dataset, list):
+                        temp_dataset.extend(dataset)
+                    else:
+                        temp_dataset.append(dataset)
+                    break
+
+            original_transforms = []
+            for ds in temp_dataset:
+                assert hasattr(ds, "transform"), (
+                    f"Dataset {ds} does not have a transform attribute"
+                )
+                original_transforms.append(ds.transform)
+                ds.transform = self.data_module.test_transform
+
+            # Create temporary loader with test batch size for efficiency
+            temp_loader = torch.utils.data.DataLoader(
+                dataset,
+                batch_size=self.training_config["eval_batch_size"],  # Use larger eval batch size
+                shuffle=False,  # No need to shuffle for prototype extraction
+                num_workers=train_loader.num_workers,
+                pin_memory=train_loader.pin_memory,
+            )
+
+        try:
+            # Temporarily replace current backbone with backbone from checkpoint
+            if checkpoint_path is not None:
+                current_backbone_state = {}
+                for name, param in model_to_use.named_parameters():
+                    if "backbone" in name or "encoder" in name:
+                        current_backbone_state[name] = param.clone().detach()
+                        if name in previous_model_state:
+                            param.data.copy_(previous_model_state[name])
+
+            # Initialize lists for features and labels
+            features_list = []
+            labels_list = []
+
+            # Compute prototypes with backbone from checkpoint
+            model_to_use.eval()
+
+            with torch.no_grad():
+                for inputs, targets in temp_loader:
+                    inputs = inputs.to(self.device)
+                    targets = targets.to(self.device)
+
+                    # Filter to current task classes only
+                    task_mask = torch.isin(
+                        targets,
+                        torch.tensor(list(self.current_task_classes), device=self.device),
+                    )
+                    if not task_mask.any():
+                        continue
+
+                    inputs = inputs[task_mask]
+                    targets = targets[task_mask]
+
+                    # Extract features with backbone from checkpoint
+                    features = model_to_use.forward_features(inputs)
+
+                    features_list.append(features.cpu())
+                    labels_list.append(targets.cpu())
+
+            # Compute prototypes
+            prototypes = self._compute_prototypes_from_features(
+                features_list, labels_list
+            )
+
+            # Restore current backbone state
+            for name, param in model_to_use.named_parameters():
+                if name in current_backbone_state:
+                    param.data.copy_(current_backbone_state[name])
+
+            return prototypes
+
+        finally:
+            # Restore original transforms
+            if (
+                self.data_module is not None
+                and original_transforms
+            ):
+                for dataset, original in zip(temp_dataset, original_transforms):
+                    assert hasattr(dataset, "transform"), (
+                        f"Dataset {dataset} does not have a transform attribute"
+                    )
+                    dataset.transform = original
+
+    def _compute_prototypes_from_features(
+        self,
+        features_list: List[torch.Tensor],
+        labels_list: List[torch.Tensor],
+    ) -> Dict[int, torch.Tensor]:
+        """
+        Compute prototypes from features and labels.
+
+        Args:
+            features_list: List of feature tensors
+            labels_list: List of label tensors
+
+        Returns:
+            Prototypes dict with class indices as keys and prototypes as values
+        """
+        # Concatenate all features and labels
+        all_features = torch.cat(features_list, dim=0).to(self.device)
+        all_labels = torch.cat(labels_list, dim=0).to(self.device)
+
+        # Compute prototypes for each class
+        prototypes = {}
+        for class_idx in self.current_task_classes:
+            class_mask = all_labels == class_idx
+            if class_mask.any():
+                class_features = all_features[class_mask]
+                prototypes[class_idx] = class_features.mean(dim=0)
+
+        return prototypes
+    
+    def calibrate_previous_classifiers(
+        self,
+        step: int,
+        train_loader: DataLoader,
+        all_step_classes: List[List[int]],
+    ):
+        debug_enabled = self.debug_config.get("enabled", False)
+        debug_prefix = "[DEBUG] " if debug_enabled else ""
+        print(f"{debug_prefix}Starting classifier calibration for step {step + 1}")
+
+        # Extract prototypes for current task
+        if self.calibration_classifier_as_prototype:
+            model = self.model.module if self.distributed else self.model
+            all_prototypes = model.classifier.classifier.prototypes.data.clone().detach()
+            current_prototypes = {cid: all_prototypes[cid] for cid in self.current_task_classes}
+        else:
+            current_prototypes = self._extract_prototypes_with_backbone(train_loader)
+
+        # Store prototypes for this step
+        self._store_task_prototypes(step, current_prototypes)
+
+        # Calibrate previous task classifiers if this is not the first step
+        if step > 0:
+            self._calibrate_previous_classifiers(step, train_loader, all_step_classes)
+            print(f"{debug_prefix}Calibrated previous task classifiers for step {step + 1}")
+        else:
+            print(f"{debug_prefix}No previous task classifiers to calibrate for step {step + 1}")
+
+        print(f"{debug_prefix}Completed classifier calibration for step {step + 1}")
 
     def _reset_gradient_norm_accumulator(self):
         """
