@@ -218,6 +218,13 @@ class ContinualTrainer:
         self.ema_momentum_overrides = self.ema_config.get("momentum_overrides", {})
         self.ema_teacher_model = None  # Will be initialized at the start of each step
 
+        # For prototypical classifier (if used)
+        self.prototypical_config = self.continual_config.get("prototypical", {})
+        self.prototypical_enabled = self.config["model"]["classifier"]["type"] == "prototypical"
+        self.prototypical_replace_classifiers = self.prototypical_config.get(
+            "replace_classifiers", False
+        )
+
         # Gradient norm accumulation for epoch-wise logging
         self.grad_norm_accumulator = {}  # Dict to accumulate gradient norms by parameter name
         self.grad_norm_batch_count = 0  # Count of batches for averaging
@@ -549,45 +556,41 @@ class ContinualTrainer:
 
             # Evaluate if needed
             if (epoch + 1) % self.training_config["eval_every"] == 0:
-                # Handle calibration during training evaluation
-                if self.calibration_enabled and self.calibration_eval_with_calibration and step > 0:
-                    # Save current classifier state before temporary calibration
-                    original_classifier_state = self._save_classifier_state()
-                    print(f"{debug_prefix}Applying temporary calibration for training evaluation")
+                # Save current classifier state before evaluation modifications
+                original_classifier_state = self._save_classifier_state()
 
-                    try:
-                        # Handle evaluation with teacher model if also enabled
-                        if self.ema_enabled and self.ema_eval_with_teacher:
-                            # Save current student parameters before replacement
-                            self._save_student_parameters()
-                            # Temporarily replace student with teacher
-                            self._replace_student_with_teacher()
-                            # Apply calibration to previous classifiers for evaluation
-                            self.calibrate_previous_classifiers(step, train_loader, all_step_classes)
-                            test_loss, test_acc = self._evaluate(test_loader)
-                            # Restore original student parameters for continued training
-                            self._restore_student_parameters()
-                        else:
-                            # Apply calibration to previous classifiers for evaluation
-                            self.calibrate_previous_classifiers(step, train_loader, all_step_classes)
-                            test_loss, test_acc = self._evaluate(test_loader)
-                    finally:
-                        # Always restore original classifier state after evaluation
-                        self._restore_classifier_state(original_classifier_state)
-                        print(f"{debug_prefix}Restored original classifier weights after evaluation")
-                else:
-                    # Standard evaluation without calibration
-                    # Handle evaluation with teacher model during training
+                # Handle prototype replacement and/or calibration during training evaluation
+                try:
+                    # Apply prototype replacement if enabled
+                    if self.prototypical_enabled and self.prototypical_replace_classifiers:
+                        print(f"{debug_prefix}Applying temporary prototype replacement for training evaluation")
+                        self._replace_classifier_with_prototypes(train_loader)
+
+                    # Handle evaluation with teacher model if enabled
                     if self.ema_enabled and self.ema_eval_with_teacher:
                         # Save current student parameters before replacement
                         self._save_student_parameters()
                         # Temporarily replace student with teacher
                         self._replace_student_with_teacher()
+                        # Handle calibration during training evaluation
+                        if self.calibration_enabled and self.calibration_eval_with_calibration and step > 0:
+                            print(f"{debug_prefix}Applying temporary calibration for training evaluation")
+                            # Apply calibration to previous classifiers for evaluation
+                            self.calibrate_previous_classifiers(step, train_loader, all_step_classes)
                         test_loss, test_acc = self._evaluate(test_loader)
                         # Restore original student parameters for continued training
                         self._restore_student_parameters()
                     else:
+                        # Handle calibration during training evaluation
+                        if self.calibration_enabled and self.calibration_eval_with_calibration and step > 0:
+                            print(f"{debug_prefix}Applying temporary calibration for training evaluation")
+                            # Apply calibration to previous classifiers for evaluation
+                            self.calibrate_previous_classifiers(step, train_loader, all_step_classes)
                         test_loss, test_acc = self._evaluate(test_loader)
+                finally:
+                    # Always restore original classifier state after evaluation
+                    self._restore_classifier_state(original_classifier_state)
+                    print(f"{debug_prefix}Restored original classifier weights after evaluation")
 
                 # Log metrics
                 self._log_metrics(
@@ -639,6 +642,10 @@ class ContinualTrainer:
             # This uses the teacher from the same training iteration as the best checkpoint
             self._replace_student_with_teacher()
             print("Using EMA teacher parameters from best checkpoint for evaluation")
+
+        # Replace classifier with prototypes if using prototypical classifier
+        if self.prototypical_enabled and self.prototypical_replace_classifiers:
+            self._replace_classifier_with_prototypes(train_loader)
 
         # Apply classifier calibration if enabled
         if self.calibration_enabled:
@@ -1627,7 +1634,7 @@ class ContinualTrainer:
         checkpoint_path = os.path.join(experiment_checkpoint_dir, f"step{step}_best.pth")
         self.historical_checkpoint_paths[step] = checkpoint_path
 
-        if self.distributed and self.local_rank == 0:
+        if not self.distributed or (self.distributed and self.local_rank == 0):
             print(f"Stored prototypes and checkpoint path for step {step} for future calibration")
 
     def _compute_rigid_transform(
@@ -1763,7 +1770,7 @@ class ContinualTrainer:
             loss.backward()
             optimizer.step()
 
-            if epoch % 20 == 0 and self.distributed and self.local_rank == 0:
+            if epoch % 20 == 0 and (not self.distributed or (self.distributed and self.local_rank == 0)):
                 print(f"Calibration training epoch {epoch}, loss: {loss.item():.6f}")
 
         transform_net.eval()
@@ -1824,7 +1831,7 @@ class ContinualTrainer:
         if not self.calibration_enabled or current_step <= 0:
             return
 
-        if self.distributed and self.local_rank == 0:
+        if not self.distributed or (self.distributed and self.local_rank == 0):
             print(f"\n=== Calibrating previous classifiers at step {current_step} ===")
 
         # Get model reference
@@ -1909,10 +1916,10 @@ class ContinualTrainer:
 
                     num_calibrated += 1
 
-                    if self.distributed and self.local_rank == 0:
+                    if not self.distributed or (self.distributed and self.local_rank == 0):
                         print(f"Calibrated prototypes for step {step}")
 
-        if self.distributed and self.local_rank == 0:
+        if not self.distributed or (self.distributed and self.local_rank == 0):
             print(f"Successfully calibrated {num_calibrated} previous task classifiers using {self.calibration_method} method")
 
     def _extract_prototypes_with_backbone(
@@ -1967,16 +1974,16 @@ class ContinualTrainer:
                     break
 
             original_transforms = []
-            for ds in temp_dataset:
-                assert hasattr(ds, "transform"), (
-                    f"Dataset {ds} does not have a transform attribute"
+            for dataset in temp_dataset:
+                assert hasattr(dataset, "transform"), (
+                    f"Dataset {dataset} does not have a transform attribute"
                 )
-                original_transforms.append(ds.transform)
-                ds.transform = self.data_module.test_transform
+                original_transforms.append(dataset.transform)
+                dataset.transform = self.data_module.test_transform
 
             # Create temporary loader with test batch size for efficiency
             temp_loader = torch.utils.data.DataLoader(
-                dataset,
+                train_loader.dataset,
                 batch_size=self.training_config["eval_batch_size"],  # Use larger eval batch size
                 shuffle=False,  # No need to shuffle for prototype extraction
                 num_workers=train_loader.num_workers,
@@ -2000,8 +2007,11 @@ class ContinualTrainer:
             # Compute prototypes with backbone from checkpoint
             model_to_use.eval()
 
+            # Add progress bar with tqdm
+            data_iter = tqdm(temp_loader, desc="Extracting features for prototypes")
+
             with torch.no_grad():
-                for inputs, targets in temp_loader:
+                for inputs, targets in data_iter:
                     inputs = inputs.to(self.device)
                     targets = targets.to(self.device)
 
@@ -2027,10 +2037,12 @@ class ContinualTrainer:
                 features_list, labels_list
             )
 
-            # Restore current backbone state
-            for name, param in model_to_use.named_parameters():
-                if name in current_backbone_state:
-                    param.data.copy_(current_backbone_state[name])
+            # Restore current backbone state if using checkpoint
+            if checkpoint_path is not None:
+                # Restore current backbone state
+                for name, param in model_to_use.named_parameters():
+                    if name in current_backbone_state:
+                        param.data.copy_(current_backbone_state[name])
 
             return prototypes
 
@@ -2074,7 +2086,53 @@ class ContinualTrainer:
                 prototypes[class_idx] = class_features.mean(dim=0)
 
         return prototypes
-    
+
+    def _replace_classifier_with_prototypes(self, train_loader: DataLoader):
+        """
+        Replace classifier weights with computed prototypes from current task.
+        Uses the _extract_prototypes_with_backbone method to compute prototypes
+        with the current backbone and replaces the classifier prototypes.
+        
+        Args:
+            train_loader: Training data loader for current task
+        """
+        debug_enabled = self.debug_config.get("enabled", False)
+        debug_prefix = "[DEBUG] " if debug_enabled else ""
+
+        print(f"{debug_prefix}Starting classifier replacement with prototypes")
+
+        # Extract prototypes using current backbone
+        prototypes = self._extract_prototypes_with_backbone(train_loader)
+
+        if not prototypes:
+            print(f"Warning: No prototypes computed for current task classes {self.current_task_classes}")
+            return
+
+        # Get the model (handle distributed training)
+        model_to_use = self.model.module if self.distributed else self.model
+
+        # Check if the model has a prototypical classifier
+        if not hasattr(model_to_use.classifier, 'classifier') or not hasattr(model_to_use.classifier.classifier, 'prototypes'):
+            print("Warning: Model does not have a prototypical classifier, skipping classifier replacement")
+            return
+
+        # Replace classifier prototypes with computed prototypes
+        classifier = model_to_use.classifier.classifier
+        num_replaced = 0
+
+        for class_idx, prototype in prototypes.items():
+            if class_idx < classifier.prototypes.shape[0]:
+                # Replace the prototype for this class
+                classifier.prototypes.data[class_idx] = prototype.to(classifier.prototypes.device)
+                num_replaced += 1
+                if debug_enabled:
+                    print(f"{debug_prefix}Replaced prototype for class {class_idx}")
+            else:
+                print(f"Warning: Class index {class_idx} is out of bounds for classifier prototypes")
+
+        if not self.distributed or (self.distributed and self.local_rank == 0):
+            print(f"Replaced {num_replaced} classifier prototypes with computed prototypes")
+
     def calibrate_previous_classifiers(
         self,
         step: int,

@@ -10,6 +10,7 @@ import torch.distributed as dist
 import torch.multiprocessing as mp
 import wandb
 from omegaconf import DictConfig, OmegaConf
+from tqdm import tqdm
 
 from src.data.data_module import DataModule
 from src.models.model_factory import create_model, get_pretrained_normalization_params
@@ -254,8 +255,10 @@ def run_training(
                 pretrained_labels_list = []
 
                 model_to_use.eval()
+
+                data_iter = tqdm(temp_loader, desc="Extracting features for prototypes")
                 with torch.no_grad():
-                    for batch_idx, (inputs, targets) in enumerate(temp_loader):
+                    for inputs, targets in data_iter:
                         inputs = inputs.to(device)
                         targets = targets.to(device)
 

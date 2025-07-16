@@ -44,6 +44,7 @@ continual:
   # Prototypical classifier parameters
   prototypical:
     init_with_pretrained: false  # Use pretrained model for prototype initialization instead of current step model
+    replace_classifiers: false   # Replace classifiers with new prototypes after each step
 
   # EMA parameters (used when strategy is "ema")
   ema:
