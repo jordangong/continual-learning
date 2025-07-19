@@ -1638,6 +1638,27 @@ class ContinualTrainer:
         if not self.distributed or (self.distributed and self.local_rank == 0):
             print(f"Stored prototypes and checkpoint path for step {step} for future calibration")
 
+    def _compute_translation_transform(
+        self, source: torch.Tensor, target: torch.Tensor
+    ) -> Dict[str, torch.Tensor]:
+        """
+        Compute translation-only transformation from source to target prototypes.
+        This is the most basic calibration method that only applies a mean offset.
+
+        Args:
+            source: Source prototypes [num_classes, features]
+            target: Target prototypes [num_classes, features]
+
+        Returns:
+            Dict containing translation vector
+        """
+        # Compute translation as mean difference between target and source
+        source_mean = source.mean(dim=0)
+        target_mean = target.mean(dim=0)
+        translation = target_mean - source_mean
+
+        return {"translation": translation}
+
     def _compute_rigid_transform(
         self, source: torch.Tensor, target: torch.Tensor
     ) -> Dict[str, torch.Tensor]:
@@ -1786,12 +1807,16 @@ class ContinualTrainer:
         Args:
             prototypes: Prototypes to transform [num_classes, features]
             transform_params: Transformation parameters
-            method: Transformation method ('rigid', 'affine', 'nonlinear')
+            method: Transformation method ('translation', 'rigid', 'affine', 'nonlinear')
 
         Returns:
             Transformed prototypes
         """
-        if method == "rigid":
+        if method == "translation":
+            # Apply translation-only transformation: p + t
+            return prototypes + transform_params["translation"]
+
+        elif method == "rigid":
             # Apply rigid transformation: R @ p + t
             return (
                 torch.matmul(prototypes, transform_params["rotation"].T)
@@ -1880,7 +1905,11 @@ class ContinualTrainer:
 
         # Compute transformation from current task prototypes (with previous backbone) to current task prototypes (with current backbone)
         # This measures the backbone drift for the current task
-        if self.calibration_method == "rigid":
+        if self.calibration_method == "translation":
+            transform_params = self._compute_translation_transform(
+                reference_task_prototypes, current_task_prototypes
+            )
+        elif self.calibration_method == "rigid":
             transform_params = self._compute_rigid_transform(
                 reference_task_prototypes, current_task_prototypes
             )

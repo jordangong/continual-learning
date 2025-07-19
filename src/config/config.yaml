@@ -60,7 +60,7 @@ continual:
     enabled: false             # Enable classifier calibration for continual learning
     classifier_as_prototype: true # Use classifier as prototype for calibration
     eval_with_calibration: true # Apply calibration during training evaluation (temporary)
-    method: "rigid"             # Calibration method: "rigid", "affine", or "nonlinear"
+    method: "translation"       # Calibration method: "translation", "rigid", "affine", or "nonlinear"
     regularization_weight: 0.01 # Regularization weight for nonlinear transform (L2 penalty)
     strength: 1.0              # Calibration strength: 0.0 = original prototypes only, 1.0 = calibrated prototypes only
 
