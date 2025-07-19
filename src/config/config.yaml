@@ -62,6 +62,7 @@ continual:
     eval_with_calibration: true # Apply calibration during training evaluation (temporary)
     method: "rigid"             # Calibration method: "rigid", "affine", or "nonlinear"
     regularization_weight: 0.01 # Regularization weight for nonlinear transform (L2 penalty)
+    strength: 1.0              # Calibration strength: 0.0 = original prototypes only, 1.0 = calibrated prototypes only
 
   # Prompt tuning parameters (used when strategy is "prompt_tuning")
   prompt_tuning:

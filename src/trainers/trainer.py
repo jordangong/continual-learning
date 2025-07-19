@@ -74,6 +74,7 @@ class ContinualTrainer:
         self.calibration_eval_with_calibration = self.calibration_config.get("eval_with_calibration", False)
         self.calibration_method = self.calibration_config.get("method", "rigid")  # rigid, affine, nonlinear
         self.calibration_reg_weight = self.calibration_config.get("regularization_weight", 0.01)
+        self.calibration_strength = self.calibration_config.get("strength", 1.0)  # 0.0 = original, 1.0 = calibrated
 
         # Storage for historical prototypes and checkpoint paths for calibration
         self.historical_prototypes = {}  # Format: {step: {class_idx: prototype}}
@@ -1911,8 +1912,19 @@ class ContinualTrainer:
                         original_prototypes, transform_params, self.calibration_method
                     )
 
+                    # Apply calibration strength parameter to blend original and calibrated prototypes
+                    if self.calibration_strength < 1.0:
+                        # Weighted combination of original and calibrated prototypes
+                        final_prototypes = (
+                            (1 - self.calibration_strength) * original_prototypes + 
+                            self.calibration_strength * calibrated_prototypes
+                        )
+                    else:
+                        # Use fully calibrated prototypes (default behavior)
+                        final_prototypes = calibrated_prototypes
+
                     # Update the classifier prototypes
-                    classifier.prototypes.data[class_indices] = calibrated_prototypes
+                    classifier.prototypes.data[class_indices] = final_prototypes
 
                     num_calibrated += 1
 
