@@ -565,7 +565,7 @@ class ContinualTrainer:
                     # Apply prototype replacement if enabled
                     if self.prototypical_enabled and self.prototypical_replace_classifiers:
                         print(f"{debug_prefix}Applying temporary prototype replacement for training evaluation")
-                        self._replace_classifier_with_prototypes(train_loader)
+                        self._replace_classifier_with_prototypes(train_loader, self.current_task_classes)
 
                     # Handle evaluation with teacher model if enabled
                     if self.ema_enabled and self.ema_eval_with_teacher:
@@ -646,7 +646,7 @@ class ContinualTrainer:
 
         # Replace classifier with prototypes if using prototypical classifier
         if self.prototypical_enabled and self.prototypical_replace_classifiers:
-            self._replace_classifier_with_prototypes(train_loader)
+            self._replace_classifier_with_prototypes(train_loader, self.current_task_classes)
 
         # Apply classifier calibration if enabled
         if self.calibration_enabled:
@@ -1896,7 +1896,7 @@ class ContinualTrainer:
         # Compute current task prototypes using previous backbone from checkpoint
         previous_checkpoint_path = self.historical_checkpoint_paths[reference_step]
         reference_task_prototypes = self._extract_prototypes_with_backbone(
-            train_loader, previous_checkpoint_path
+            train_loader, previous_checkpoint_path, all_step_classes[current_step]
         )
 
         # Convert prototypes to tensors
@@ -1964,7 +1964,10 @@ class ContinualTrainer:
             print(f"Successfully calibrated {num_calibrated} previous task classifiers using {self.calibration_method} method")
 
     def _extract_prototypes_with_backbone(
-        self, train_loader: DataLoader, checkpoint_path: str=None
+        self,
+        train_loader: DataLoader,
+        checkpoint_path: str=None,
+        current_task_classes: List[int]=None,
     ) -> Dict[int, torch.Tensor]:
         """
         Compute current task prototypes using backbone from checkpoint.
@@ -1974,6 +1977,7 @@ class ContinualTrainer:
         Args:
             train_loader: Training data loader for current task
             checkpoint_path: Path to checkpoint
+            current_task_classes: List of current task class indices
 
         Returns:
             Prototypes computed with backbone from checkpoint
@@ -2059,7 +2063,7 @@ class ContinualTrainer:
                     # Filter to current task classes only
                     task_mask = torch.isin(
                         targets,
-                        torch.tensor(list(self.current_task_classes), device=self.device),
+                        torch.tensor(current_task_classes, device=self.device),
                     )
                     if not task_mask.any():
                         continue
@@ -2075,7 +2079,7 @@ class ContinualTrainer:
 
             # Compute prototypes
             prototypes = self._compute_prototypes_from_features(
-                features_list, labels_list
+                features_list, labels_list, current_task_classes
             )
 
             # Restore current backbone state if using checkpoint
@@ -2103,6 +2107,7 @@ class ContinualTrainer:
         self,
         features_list: List[torch.Tensor],
         labels_list: List[torch.Tensor],
+        current_task_classes: List[int],
     ) -> Dict[int, torch.Tensor]:
         """
         Compute prototypes from features and labels.
@@ -2110,6 +2115,7 @@ class ContinualTrainer:
         Args:
             features_list: List of feature tensors
             labels_list: List of label tensors
+            current_task_classes: List of current task class indices
 
         Returns:
             Prototypes dict with class indices as keys and prototypes as values
@@ -2120,7 +2126,7 @@ class ContinualTrainer:
 
         # Compute prototypes for each class
         prototypes = {}
-        for class_idx in self.current_task_classes:
+        for class_idx in current_task_classes:
             class_mask = all_labels == class_idx
             if class_mask.any():
                 class_features = all_features[class_mask]
@@ -2128,7 +2134,7 @@ class ContinualTrainer:
 
         return prototypes
 
-    def _replace_classifier_with_prototypes(self, train_loader: DataLoader):
+    def _replace_classifier_with_prototypes(self, train_loader: DataLoader, current_task_classes: List[int]):
         """
         Replace classifier weights with computed prototypes from current task.
         Uses the _extract_prototypes_with_backbone method to compute prototypes
@@ -2136,6 +2142,7 @@ class ContinualTrainer:
         
         Args:
             train_loader: Training data loader for current task
+            current_task_classes: List of current task class indices
         """
         debug_enabled = self.debug_config.get("enabled", False)
         debug_prefix = "[DEBUG] " if debug_enabled else ""
@@ -2143,10 +2150,10 @@ class ContinualTrainer:
         print(f"{debug_prefix}Starting classifier replacement with prototypes")
 
         # Extract prototypes using current backbone
-        prototypes = self._extract_prototypes_with_backbone(train_loader)
+        prototypes = self._extract_prototypes_with_backbone(train_loader, current_task_classes=current_task_classes)
 
         if not prototypes:
-            print(f"Warning: No prototypes computed for current task classes {self.current_task_classes}")
+            print(f"Warning: No prototypes computed for current task classes {current_task_classes}")
             return
 
         # Get the model (handle distributed training)
@@ -2188,9 +2195,11 @@ class ContinualTrainer:
         if self.calibration_classifier_as_prototype:
             model = self.model.module if self.distributed else self.model
             all_prototypes = model.classifier.classifier.prototypes.data.clone().detach()
-            current_prototypes = {cid: all_prototypes[cid] for cid in self.current_task_classes}
+            current_prototypes = {cid: all_prototypes[cid] for cid in all_step_classes[step]}
         else:
-            current_prototypes = self._extract_prototypes_with_backbone(train_loader)
+            current_prototypes = self._extract_prototypes_with_backbone(
+                train_loader, current_task_classes=all_step_classes[step]
+            )
 
         # Store prototypes for this step
         self._store_task_prototypes(step, current_prototypes)

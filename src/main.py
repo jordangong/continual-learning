@@ -157,6 +157,22 @@ def run_training(
         )
         all_step_classes.append(step_classes)
 
+        # For eval_only mode with calibration, populate historical checkpoint paths
+        if eval_only and trainer.calibration_enabled and step > 0:
+            # Populate checkpoint paths for all previous steps
+            experiment_name = config["experiment"]["name"]
+            experiment_checkpoint_dir = os.path.join(trainer.checkpoint_dir, experiment_name)
+            # Add checkpoint paths for all previous steps (0 to step)
+            for prev_step in range(step + 1):
+                if prev_step not in trainer.historical_checkpoint_paths:
+                    checkpoint_path = os.path.join(experiment_checkpoint_dir, f"step{prev_step}_best.pth")
+                    trainer.historical_checkpoint_paths[prev_step] = checkpoint_path
+
+                    if not distributed or (distributed and rank == 0):
+                        # Verify checkpoint exists for offline calibration
+                        if not os.path.exists(checkpoint_path):
+                            print(f"Warning: Checkpoint not found for offline calibration: {checkpoint_path}")
+
         # Apply debug settings to limit data loaders if enabled
         train_loader, test_loader = data_module.limit_data_loaders(
             train_loader,
@@ -167,7 +183,9 @@ def run_training(
         )
 
         # Initialize prototypes if using prototypical classifier
-        if config["model"]["classifier"]["type"] == "prototypical":
+        if (
+            not (eval_only and config["continual"]["strategy"] != "zeroshot")
+        ) and config["model"]["classifier"]["type"] == "prototypical":
             # Only print on main process if distributed
             if not distributed or (distributed and rank == 0):
                 print(
@@ -312,6 +330,25 @@ def run_training(
             if config["continual"]["strategy"] != "zeroshot":
                 # Load model from checkpoint and evaluate
                 trainer._load_checkpoint(step, best=True)
+
+            # Set prototypes initialized flag for prototypical classifier
+            if config["model"]["classifier"]["type"] == "prototypical":
+                trainer.model.classifier.classifier.prototypes_initialized = True
+
+            # Handle evaluation with teacher model
+            if trainer.ema_enabled and trainer.ema_eval_with_teacher:
+                # Replace student with saved teacher AFTER loading checkpoint
+                # This uses the teacher from the same training iteration as the best checkpoint
+                trainer._replace_student_with_teacher()
+                print("Using EMA teacher parameters from best checkpoint for evaluation")
+
+            # Replace classifier with prototypes if using prototypical classifier
+            if trainer.prototypical_enabled and trainer.prototypical_replace_classifiers:
+                trainer._replace_classifier_with_prototypes(train_loader, all_step_classes[step])
+
+            # Apply offline calibration if enabled
+            if trainer.calibration_enabled:
+                trainer.calibrate_previous_classifiers(step, train_loader, all_step_classes)
 
             # Evaluate model on test data
             _, test_acc = trainer._evaluate(test_loader)
