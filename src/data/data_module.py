@@ -239,7 +239,7 @@ class DataModule:
                 transform=self.train_transform,
                 test_transform=self.test_transform,
                 target_transform=None,
-                download=True,
+                download=False,
                 seed=self.config["seed"],
             )
         elif dataset_name == "imagenet-r":
