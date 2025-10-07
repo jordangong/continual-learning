@@ -1,0 +1,44 @@
+name: ViT-B-16-quickgelu
+source: openclip  # Options: timm, openclip
+pretrained: openai
+freeze_backbone: false  # Whether to freeze the visual backbone during training
+freeze_classifier: false  # Whether to freeze the classifier during training
+feature_dim: 512  # Feature dimension for ViT-B/16 with projection
+skip_blocks: 0  # Number of final transformer blocks to skip
+skip_final_norm: false  # Whether to skip final norm layer after transformer blocks
+skip_proj: false  # Keep projection to match text embedding dimension
+
+# CLIP text-based classifier configuration
+classifier:
+  type: clip_text  # Use CLIP text encoder for classification
+  mode: text  # Options: text (text encoder only), linear (learned classifier), hybrid (both)
+
+  # Text prompt templates (use {} as placeholder for class name)
+  text_templates:
+    - "a photo of a {}."
+    - "a photo of the {}."
+
+  # Text encoder settings
+  freeze_text_encoder: true  # True=zero-shot (frozen), False=train text encoder
+  ensemble_text: true  # Average embeddings from multiple templates
+
+  # Similarity settings
+  normalize: true  # L2 normalize features (required for cosine similarity)
+  temperature: 100.0  # CLIP temperature (only used if use_pretrained_temperature=false)
+  use_pretrained_temperature: true  # Use CLIP's pre-trained logit_scale as temperature (recommended)
+  learnable_temperature: false  # Make temperature a learnable parameter
+  use_log_temperature: false  # If learnable_temperature=true, parameterize in log space
+
+  # Hybrid mode settings (only used if mode: hybrid)
+  hybrid_weight: 0.5  # Weight for text vs learned (0.0=learned only, 1.0=text only)
+
+  # Learned classifier settings (for linear/hybrid modes)
+  learned_classifier_type: linear  # Options: linear, mlp
+  hidden_dim: null  # Hidden dimension (required if learned_classifier_type=mlp)
+  dropout: 0.0  # Dropout for MLP classifier
+
+sae:
+  use_sae: false
+  checkpoint_path: "/path/to/your/sae_checkpoint.pt"
+  layer: -2
+  token_type: all

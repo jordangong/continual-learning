@@ -16,6 +16,379 @@ except ImportError:
 from .vit_prompt_tuning import create_vit_prompted_model
 
 
+class CLIPTextEncoderWrapper(nn.Module):
+    """Wrapper for CLIP text encoder that provides a unified interface.
+
+    This wraps the full encode_text pipeline (token_embedding, positional_embedding,
+    transformer, ln_final, text_projection) so it can be treated as a single module
+    for freezing/unfreezing and forward passes.
+    """
+
+    def __init__(self, clip_model: nn.Module):
+        """
+        Args:
+            clip_model: Full CLIP model with encode_text method
+        """
+        super().__init__()
+        self.clip_model = clip_model
+
+    def forward(self, text_tokens: torch.Tensor) -> torch.Tensor:
+        """Encode text tokens to embeddings.
+
+        Args:
+            text_tokens: Tokenized text [batch_size, sequence_length]
+
+        Returns:
+            Text embeddings [batch_size, feature_dim]
+        """
+        return self.clip_model.encode_text(text_tokens, normalize=False)
+
+    def parameters(self, recurse: bool = True):
+        """Return text encoder parameters (not visual encoder)."""
+        # Only return text-related parameters, not visual encoder
+        for name, param in self.clip_model.named_parameters(recurse=recurse):
+            # Exclude visual encoder and logit_scale (which is typically shared)
+            if not name.startswith("visual") and name != "logit_scale":
+                yield param
+    
+    def freeze(self):
+        """Freeze text encoder parameters."""
+        for name, param in self.clip_model.named_parameters():
+            if not name.startswith("visual") and name != "logit_scale":
+                param.requires_grad = False
+    
+    def unfreeze(self):
+        """Unfreeze text encoder parameters."""
+        for name, param in self.clip_model.named_parameters():
+            if not name.startswith("visual") and name != "logit_scale":
+                param.requires_grad = True
+
+
+def _create_learned_classifier(
+    in_features: int,
+    num_classes: int,
+    classifier_type: str = "linear",
+    hidden_dim: Optional[int] = None,
+    dropout: float = 0.0,
+) -> nn.Module:
+    """Create a learned classifier (linear or MLP).
+
+    Args:
+        in_features: Input feature dimension
+        num_classes: Number of output classes
+        classifier_type: "linear" or "mlp"
+        hidden_dim: Hidden dimension for MLP (required if classifier_type="mlp")
+        dropout: Dropout probability for MLP
+
+    Returns:
+        nn.Module: Linear or MLP classifier
+    """
+    if classifier_type == "linear":
+        return nn.Linear(in_features, num_classes)
+    elif classifier_type == "mlp":
+        if hidden_dim is None:
+            raise ValueError("hidden_dim must be provided for MLP classifier")
+        return nn.Sequential(
+            nn.Linear(in_features, hidden_dim),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim, num_classes),
+        )
+    else:
+        raise ValueError(f"Unsupported classifier type: {classifier_type}")
+
+
+class CLIPClassifier(nn.Module):
+    """CLIP-based classifier using text encoder for zero-shot classification."""
+
+    def __init__(
+        self,
+        text_encoder: nn.Module,
+        tokenizer: callable,
+        num_classes: int,
+        feature_dim: int,
+        class_names: Optional[List[str]] = None,
+        text_templates: Optional[List[str]] = None,
+        mode: str = "text",
+        temperature: float = 1.0,
+        normalize: bool = False,
+        hybrid_weight: float = 0.5,
+        ensemble_text: bool = False,
+        freeze_text_encoder: bool = False,
+        learned_classifier_type: str = "linear",
+        hidden_dim: Optional[int] = None,
+        dropout: float = 0.0,
+        learnable_temperature: bool = False,
+        use_log_temperature: bool = False,
+        device: Optional[torch.device] = None,
+    ):
+        """
+        Args:
+            text_encoder: CLIP text encoder module
+            tokenizer: CLIP tokenizer function
+            num_classes: Number of output classes
+            feature_dim: Dimension of image features
+            class_names: List of class names for text embedding generation
+            text_templates: List of prompt templates (e.g., "a photo of a {}")
+            mode: Classification mode:
+                - "text": Use text encoder only (frozen or trainable based on freeze_text_encoder)
+                - "linear": Use learned linear classifier on visual features
+                - "hybrid": Combine text + linear (both can be trainable)
+            temperature: Temperature scaling for logits (CLIP-style, higher = softer)
+            normalize: Whether to normalize features
+            hybrid_weight: Weight for text vs learned in hybrid mode (0=linear, 1=text)
+            ensemble_text: Average over multiple text templates
+            freeze_text_encoder: Whether to freeze text encoder (True for zero-shot, False for training)
+            learned_classifier_type: Type of learned classifier ("linear" or "mlp")
+            hidden_dim: Hidden dimension for MLP classifier (only used if learned_classifier_type="mlp")
+            dropout: Dropout probability for MLP classifier
+            learnable_temperature: Whether temperature should be learnable
+            use_log_temperature: If learnable_temperature=True, parameterize in log space
+            device: Device to place text embeddings on
+        """
+        super().__init__()
+        self.text_encoder = text_encoder
+        self.tokenizer = tokenizer
+        self.num_classes = num_classes
+        self.feature_dim = feature_dim
+        self.mode = mode
+        self.normalize = normalize
+        self.hybrid_weight = hybrid_weight
+        self.ensemble_text = ensemble_text
+        self.device = device if device is not None else torch.device("cpu")
+        self.learned_classifier_type = learned_classifier_type
+
+        # Temperature handling (similar to ClassifierHead)
+        self.use_log_temperature = use_log_temperature
+        if learnable_temperature:
+            if use_log_temperature:
+                self.log_temperature = nn.Parameter(
+                    torch.log(torch.tensor(temperature))
+                )
+            else:
+                self.temperature = nn.Parameter(torch.tensor(temperature))
+        else:
+            self.temperature = temperature
+
+        # Default text templates if not provided
+        if text_templates is None:
+            self.text_templates = [
+                "a photo of a {}.",
+                "a photo of the {}.",
+            ]
+        else:
+            self.text_templates = text_templates
+
+        # Control text encoder training
+        self.freeze_text_encoder = freeze_text_encoder
+        if freeze_text_encoder:
+            self.text_encoder.freeze()
+        else:
+            self.text_encoder.unfreeze()
+
+        # Initialize text embeddings buffer (will be set via set_class_names)
+        # Note: When text encoder is trainable, embeddings are recomputed in forward pass
+        self.register_buffer("text_embeddings", torch.zeros(num_classes, feature_dim))
+        self.text_embeddings_initialized = False
+
+        # For linear and hybrid modes, create a learnable classifier
+        if self.mode in ["linear", "hybrid"]:
+            self.learned_classifier = _create_learned_classifier(
+                in_features=feature_dim,
+                num_classes=num_classes,
+                classifier_type=learned_classifier_type,
+                hidden_dim=hidden_dim,
+                dropout=dropout,
+            )
+        else:
+            self.learned_classifier = None
+
+        # Initialize class names if provided
+        if class_names is not None:
+            self.set_class_names(class_names)
+
+    def set_class_names(
+        self, class_names: List[str], class_indices: Optional[List[int]] = None
+    ) -> None:
+        """Store class names and optionally precompute text embeddings.
+
+        Args:
+            class_names: List of class names
+            class_indices: Optional list of class indices to update (for incremental learning)
+                          If None, assumes class_names correspond to indices 0, 1, 2, ...
+        """
+        if class_indices is None:
+            class_indices = list(range(len(class_names)))
+
+        # Store class names (required for trainable text encoder)
+        if not hasattr(self, "_class_names"):
+            self._class_names = [None] * self.num_classes
+        for i, class_idx in enumerate(class_indices):
+            if class_idx < self.num_classes:
+                self._class_names[class_idx] = class_names[i]
+
+        # Only precompute and cache embeddings when text encoder is frozen
+        # For trainable text encoder, embeddings are computed dynamically in forward pass
+        if self.freeze_text_encoder:
+            with torch.no_grad():
+                new_text_embeddings = self._encode_class_names(class_names)
+
+            # Cache text embeddings
+            for i, class_idx in enumerate(class_indices):
+                if class_idx < self.num_classes:
+                    self.text_embeddings[class_idx] = new_text_embeddings[i]
+
+        self.text_embeddings_initialized = True
+
+    def _encode_class_names(self, class_names: List[str]) -> torch.Tensor:
+        """Encode multiple class names to text embeddings in a single batch.
+
+        Args:
+            class_names: List of class names to encode
+
+        Returns:
+            Text embeddings tensor [num_classes, feature_dim]
+        """
+        if not class_names:
+            return torch.empty(0, self.feature_dim, device=self.device)
+
+        # Generate all prompts for all classes
+        all_prompts = []
+        for class_name in class_names:
+            prompts = [template.format(class_name) for template in self.text_templates]
+            all_prompts.extend(prompts)
+
+        # Tokenize all prompts in one batch
+        text_tokens = self.tokenizer(all_prompts)
+        text_tokens = text_tokens.to(self.device)
+
+        # Extract text features in one forward pass
+        all_text_features = self.text_encoder(text_tokens)
+
+        # Normalize if specified
+        if self.normalize:
+            all_text_features = F.normalize(all_text_features, p=2, dim=-1)
+
+        # Reshape to [num_classes, num_templates, feature_dim]
+        num_templates = len(self.text_templates)
+        all_text_features = all_text_features.view(len(class_names), num_templates, -1)
+
+        # Ensemble over templates if specified
+        if self.ensemble_text:
+            class_embeddings = all_text_features.mean(
+                dim=1
+            )  # [num_classes, feature_dim]
+        else:
+            # Use first template only
+            class_embeddings = all_text_features[:, 0, :]  # [num_classes, feature_dim]
+
+        return class_embeddings
+
+    def _compute_text_embeddings(self) -> torch.Tensor:
+        """Compute text embeddings from class names (used when text encoder is trainable).
+
+        Returns:
+            Text embeddings tensor [num_classes, feature_dim]
+        """
+        if not hasattr(self, "_class_names") or self._class_names[0] is None:
+            # Fallback to cached embeddings if class names not stored
+            return self.text_embeddings
+
+        # Separate valid class names from None entries
+        valid_class_names = []
+        valid_indices = []
+        for idx, class_name in enumerate(self._class_names):
+            if class_name is not None:
+                valid_class_names.append(class_name)
+                valid_indices.append(idx)
+
+        # Batch encode all valid class names
+        if valid_class_names:
+            valid_embeddings = self._encode_class_names(valid_class_names)
+        else:
+            valid_embeddings = torch.empty(0, self.feature_dim, device=self.device)
+
+        # Build full embeddings tensor with zeros for uninitialized classes
+        all_embeddings = torch.zeros(
+            self.num_classes, self.feature_dim, device=self.device
+        )
+        for i, idx in enumerate(valid_indices):
+            all_embeddings[idx] = valid_embeddings[i]
+
+        return all_embeddings
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Forward pass using text embeddings and/or learned classifier.
+
+        Args:
+            x: Image features [batch_size, feature_dim]
+
+        Returns:
+            Logits [batch_size, num_classes]
+        """
+        # Get temperature value
+        if self.use_log_temperature:
+            temperature = torch.exp(self.log_temperature)
+        else:
+            temperature = self.temperature
+
+        if self.mode == "text":
+            # Text encoder only (can be frozen or trainable)
+            if not self.text_embeddings_initialized:
+                return torch.zeros(x.size(0), self.num_classes, device=x.device)
+
+            # Get text embeddings (recompute if text encoder is trainable)
+            if self.freeze_text_encoder:
+                text_embeddings = self.text_embeddings
+            else:
+                text_embeddings = self._compute_text_embeddings()
+
+            # Normalize image features if specified
+            if self.normalize:
+                x = F.normalize(x, p=2, dim=1)
+
+            # Compute cosine similarity scaled by temperature
+            logits = torch.matmul(x, text_embeddings.t())
+            return logits / temperature
+
+        elif self.mode == "linear":
+            # Standard learned classifier on visual features
+            logits = self.learned_classifier(x)
+            return logits / temperature
+
+        elif self.mode == "hybrid":
+            # Combination of text and learned classifiers
+            # Both text encoder and learned classifier can be trainable
+
+            # Get text embeddings (recompute if text encoder is trainable)
+            if self.freeze_text_encoder:
+                text_embeddings = self.text_embeddings
+            else:
+                text_embeddings = self._compute_text_embeddings()
+
+            # Normalize image features if specified
+            if self.normalize:
+                x_norm = F.normalize(x, p=2, dim=1)
+            else:
+                x_norm = x
+
+            # Text-based logits
+            text_logits = torch.matmul(x_norm, text_embeddings.t()) / temperature
+
+            # Learned logits (with temperature scaling)
+            learned_logits = self.learned_classifier(x) / temperature
+
+            # Weighted combination
+            logits = (
+                self.hybrid_weight * text_logits
+                + (1 - self.hybrid_weight) * learned_logits
+            )
+            return logits
+
+        else:
+            raise ValueError(f"Unsupported mode: {self.mode}")
+
+
 class PrototypicalClassifier(nn.Module):
     """Prototypical classifier using class prototypes for zero-shot classification."""
 
@@ -164,28 +537,34 @@ class ClassifierHead(nn.Module):
         if learnable_temperature:
             if use_log_temperature:
                 # Store temperature in log space for better optimization stability
-                self.log_temperature = nn.Parameter(torch.log(torch.tensor(temperature)))
+                self.log_temperature = nn.Parameter(
+                    torch.log(torch.tensor(temperature))
+                )
             else:
                 # Store temperature directly
                 self.temperature = nn.Parameter(torch.tensor(temperature))
         else:
             self.temperature = temperature
 
-        if classifier_type == "linear":
-            self.classifier = nn.Linear(in_features, num_classes)
-        elif classifier_type == "mlp":
-            assert hidden_dim is not None, (
-                "hidden_dim must be provided for MLP classifier"
-            )
-            self.classifier = nn.Sequential(
-                nn.Linear(in_features, hidden_dim),
-                nn.ReLU(),
-                nn.Dropout(dropout),
-                nn.Linear(hidden_dim, num_classes),
+        # Create classifier using shared function
+        if classifier_type in ["linear", "mlp"]:
+            self.classifier = _create_learned_classifier(
+                in_features=in_features,
+                num_classes=num_classes,
+                classifier_type=classifier_type,
+                hidden_dim=hidden_dim,
+                dropout=dropout,
             )
         elif classifier_type == "prototypical":
             self.classifier = PrototypicalClassifier(
                 in_features, num_classes, normalize=normalize
+            )
+        elif classifier_type == "clip_text":
+            # CLIP text-based classifier - requires text_encoder and tokenizer
+            # These will be passed during initialization from PretrainedModel
+            raise ValueError(
+                "CLIP text classifier must be created through PretrainedModel, "
+                "not through ClassifierHead directly."
             )
         else:
             raise ValueError(f"Unsupported classifier type: {classifier_type}")
@@ -257,6 +636,23 @@ class PretrainedModel(nn.Module):
         # Store cache directory
         self.cache_dir = cache_dir
 
+        # Get classifier configuration
+        classifier_config = model_config.get("classifier", {})
+        classifier_type = classifier_config.get("type", "linear")
+        hidden_dim = classifier_config.get("hidden_dim", None)
+        dropout = classifier_config.get("dropout", 0.0)
+        temperature = classifier_config.get("temperature", 1.0)
+        normalize = classifier_config.get("normalize", False)
+        learnable_temperature = classifier_config.get("learnable_temperature", False)
+        use_log_temperature = classifier_config.get("use_log_temperature", False)
+
+        # CLIP text encoder configuration
+        self.text_encoder = None
+        self.tokenizer = None
+        self.use_text_encoder = (
+            classifier_type == "clip_text" and self.source.lower() == "openclip"
+        )
+
         # SAE configuration
         self.sae_config = model_config.get("sae", {})
         self.use_sae = self.sae_config.get("use_sae", False)
@@ -270,8 +666,17 @@ class PretrainedModel(nn.Module):
                 "SAE checkpoint path must be provided when use_sae is True"
             )
 
-        # Load backbone
-        self.backbone, self.feature_dim = self._load_backbone()
+        # Load backbone (and optionally text encoder for CLIP)
+        if self.use_text_encoder:
+            (
+                self.backbone,
+                self.feature_dim,
+                self.text_encoder,
+                self.tokenizer,
+                clip_model,
+            ) = self._load_backbone()
+        else:
+            self.backbone, self.feature_dim = self._load_backbone()
 
         # Freeze backbone if specified
         if self.freeze_backbone:
@@ -279,34 +684,75 @@ class PretrainedModel(nn.Module):
                 param.requires_grad = False
 
         # Create classifier
-        classifier_config = model_config.get("classifier", {})
-        classifier_type = classifier_config.get("type", "linear")
-        hidden_dim = classifier_config.get("hidden_dim", None)
-        dropout = classifier_config.get("dropout", 0.0)
-        temperature = classifier_config.get("temperature", 1.0)
-        normalize = classifier_config.get("normalize", False)
-        learnable_temperature = classifier_config.get("learnable_temperature", False)
-        use_log_temperature = classifier_config.get("use_log_temperature", False)
+        if self.use_text_encoder:
+            # Create CLIP text-based classifier
+            mode = classifier_config.get("mode", "text")
+            text_templates = classifier_config.get("text_templates", None)
+            hybrid_weight = classifier_config.get("hybrid_weight", 0.5)
+            ensemble_text = classifier_config.get("ensemble_text", False)
+            freeze_text_encoder = classifier_config.get("freeze_text_encoder", False)
+            learned_classifier_type = classifier_config.get(
+                "learned_classifier_type", "linear"
+            )
+            use_pretrained_temperature = classifier_config.get(
+                "use_pretrained_temperature", True
+            )
 
-        self.classifier = ClassifierHead(
-            in_features=self.feature_dim,
-            num_classes=num_classes,
-            classifier_type=classifier_type,
-            hidden_dim=hidden_dim,
-            dropout=dropout,
-            temperature=temperature,
-            normalize=normalize,
-            learnable_temperature=learnable_temperature,
-            use_log_temperature=use_log_temperature,
-        )
+            # Extract CLIP's pre-trained temperature if requested
+            if use_pretrained_temperature and hasattr(clip_model, "logit_scale"):
+                # CLIP stores temperature as log(scale), we need exp(logit_scale)
+                temperature = clip_model.logit_scale.exp().item()
+                print(f"Using CLIP pre-trained temperature: {temperature:.2f}")
+            elif use_pretrained_temperature:
+                print(
+                    f"Warning: use_pretrained_temperature=True but model has no logit_scale. Using temperature={temperature}"
+                )
+
+            self.classifier = CLIPClassifier(
+                text_encoder=self.text_encoder,
+                tokenizer=self.tokenizer,
+                num_classes=num_classes,
+                feature_dim=self.feature_dim,
+                mode=mode,
+                text_templates=text_templates,
+                temperature=temperature,
+                normalize=normalize,
+                hybrid_weight=hybrid_weight,
+                ensemble_text=ensemble_text,
+                freeze_text_encoder=freeze_text_encoder,
+                learned_classifier_type=learned_classifier_type,
+                hidden_dim=hidden_dim,
+                dropout=dropout,
+                learnable_temperature=learnable_temperature,
+                use_log_temperature=use_log_temperature,
+                device=self.device,
+            )
+        else:
+            # Create standard classifier
+            self.classifier = ClassifierHead(
+                in_features=self.feature_dim,
+                num_classes=num_classes,
+                classifier_type=classifier_type,
+                hidden_dim=hidden_dim,
+                dropout=dropout,
+                temperature=temperature,
+                normalize=normalize,
+                learnable_temperature=learnable_temperature,
+                use_log_temperature=use_log_temperature,
+            )
 
         # Freeze classifier if specified
         if self.freeze_classifier:
             for param in self.classifier.parameters():
                 param.requires_grad = False
 
-    def _load_backbone(self) -> Tuple[nn.Module, int]:
-        """Load backbone model based on configuration."""
+    def _load_backbone(self):
+        """Load backbone model based on configuration.
+
+        Returns:
+            For standard models: (backbone, feature_dim)
+            For CLIP with text encoder: (backbone, feature_dim, text_encoder, tokenizer)
+        """
         if self.source.lower() == "timm":
             model = timm.create_model(
                 self.model_name,
@@ -387,8 +833,18 @@ class PretrainedModel(nn.Module):
                 ):
                     self._skip_transformer_blocks(model.visual)
 
-            # Return only the visual part of CLIP
-            return model.visual, feature_dim
+            # Return visual encoder + optionally text encoder and tokenizer
+            if self.use_text_encoder:
+                # Return full model components for CLIP text classification
+                # Wrap the full CLIP model's encode_text pipeline in a module
+                text_encoder = CLIPTextEncoderWrapper(model)
+                tokenizer = open_clip.get_tokenizer(self.model_name)
+                print(f"Loaded CLIP model with text encoder wrapper for {self.model_name}")
+                # Return full CLIP model for accessing logit_scale
+                return model.visual, feature_dim, text_encoder, tokenizer, model
+            else:
+                # Return only the visual part of CLIP (original behavior)
+                return model.visual, feature_dim
 
         else:
             raise ValueError(f"Unsupported model source: {self.source}")
@@ -515,9 +971,24 @@ class PretrainedModel(nn.Module):
         """Extract features without classification."""
         return self.backbone(x)
 
+    def set_class_names(
+        self, class_names: List[str], class_indices: Optional[List[int]] = None
+    ) -> None:
+        """Set class names for CLIP text classifier.
+
+        Args:
+            class_names: List of class names
+            class_indices: Optional list of class indices (for incremental updates)
+        """
+        if isinstance(self.classifier, CLIPClassifier):
+            self.classifier.set_class_names(class_names, class_indices)
+        else:
+            print("Warning: set_class_names called on non-CLIP classifier")
+
     def update_prototypes(self, features: torch.Tensor, labels: torch.Tensor) -> None:
         """Update prototypes if using prototypical classifier."""
-        self.classifier.update_prototypes(features, labels)
+        if hasattr(self.classifier, "update_prototypes"):
+            self.classifier.update_prototypes(features, labels)
 
     def compute_prototypes(
         self,
@@ -532,7 +1003,8 @@ class PretrainedModel(nn.Module):
             labels_list: List of label tensors
             reset: Whether to reset existing prototypes before computing
         """
-        self.classifier.compute_prototypes(features_list, labels_list, reset=reset)
+        if hasattr(self.classifier, "compute_prototypes"):
+            self.classifier.compute_prototypes(features_list, labels_list, reset=reset)
 
     def init_prototypes_from_data(
         self, data_loader: torch.utils.data.DataLoader, reset: bool = True
@@ -612,31 +1084,18 @@ def get_pretrained_normalization_params(
     default_std = (0.229, 0.224, 0.225)
 
     if source == "timm":
-        # Get the default_cfg from timm
-        default_cfg = timm.models.get_pretrained_cfg(model_name)
-        # Handle both dictionary and PretrainedCfg object
-        if hasattr(default_cfg, "mean") and hasattr(default_cfg, "std"):
-            # PretrainedCfg object case
-            return default_cfg.mean, default_cfg.std
-        elif (
-            isinstance(default_cfg, dict)
-            and "mean" in default_cfg
-            and "std" in default_cfg
-        ):
-            # Dictionary case
-            return default_cfg["mean"], default_cfg["std"]
-
+        cfg = timm.models.get_pretrained_cfg(model_name)
     elif source == "openclip":
-        # For OpenCLIP, we create the model and transforms to get normalization params
-        _, preprocess, _ = open_clip.create_model_and_transforms(
-            model_name,
-            pretrained=None,  # Don't need weights for this
-            cache_dir=cache_dir,
-        )
-        # Extract normalization parameters from the transform pipeline
-        for transform in preprocess.transforms:
-            if hasattr(transform, "mean") and hasattr(transform, "std"):
-                return transform.mean, transform.std
+        tag = model_config.get("pretrained", "openai")
+        cfg = open_clip.get_pretrained_cfg(model_name, tag)
+
+    # Handle both dictionary and PretrainedCfg object
+    if hasattr(cfg, "mean") and hasattr(cfg, "std"):
+        # PretrainedCfg object case
+        return cfg.mean, cfg.std
+    elif isinstance(cfg, dict) and "mean" in cfg and "std" in cfg:
+        # Dictionary case
+        return cfg["mean"], cfg["std"]
 
     # Return default ImageNet normalization if we couldn't extract from model
     return default_mean, default_std

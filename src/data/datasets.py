@@ -61,6 +61,7 @@ class ContinualDataset:
         self.dataset_test = None
         self.num_classes = None
         self.class_order = None
+        self.class_names = None
 
         # Cache for dataset indices by class
         self._class_indices_cache = {}
@@ -324,6 +325,51 @@ class ContinualDataset:
         # Create memory dataset
         memory_dataset = Subset(self.dataset_train, memory_indices)
         return memory_dataset
+
+    def get_class_names(self, class_indices: List[int]) -> List[str]:
+        """Get class names for given class indices.
+
+        Args:
+            class_indices: List of class indices
+
+        Returns:
+            List of class names as strings
+
+        Raises:
+            ValueError: If class names cannot be extracted from dataset
+            IndexError: If class indices are out of bounds
+        """
+        if self.class_names is None:
+            # Try to get class names from dataset
+            if hasattr(self.dataset_train, "classes"):
+                self.class_names = self.dataset_train.classes
+            elif hasattr(self.dataset_train, "class_to_idx"):
+                # Create class names from class_to_idx mapping
+                idx_to_class = {v: k for k, v in self.dataset_train.class_to_idx.items()}
+                self.class_names = [idx_to_class[i] for i in range(len(idx_to_class))]
+            else:
+                # Cannot extract class names - this is a critical error
+                raise ValueError(
+                    f"Cannot extract class names from dataset {type(self.dataset_train).__name__}. "
+                    f"Dataset must have either 'classes' or 'class_to_idx' attribute. "
+                    f"This is required for text-based classifiers (e.g., CLIP)."
+                )
+
+        # class_indices are already in original dataset space (from _get_step_classes)
+        # No need to map through class_order again - that would be double-mapping
+        result_names = []
+        for idx in class_indices:
+            # Validate index bounds
+            if idx >= len(self.class_names):
+                raise IndexError(
+                    f"Class index {idx} is out of bounds. "
+                    f"Dataset has {len(self.class_names)} classes but got index {idx}. "
+                    f"Check class_order configuration and num_classes setting."
+                )
+
+            result_names.append(self.class_names[idx])
+
+        return result_names
 
 
 class CIFAR100CL(ContinualDataset):

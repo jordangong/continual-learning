@@ -323,6 +323,36 @@ def run_training(
                     )
                     dataset.transform = original
 
+        # Initialize CLIP text classifier with class names
+        if config["model"]["classifier"]["type"] == "clip_text":
+            # Get class names for current step
+            step_class_names = data_module.dataset.get_class_names(all_step_classes[step])
+
+            # Get the actual model (unwrap DDP if needed)
+            model_to_init = model.module if distributed else model
+
+            # Check if text encoder is frozen or trainable
+            freeze_text_encoder = config["model"]["classifier"].get("freeze_text_encoder", True)
+
+            # Only print on main process if distributed
+            if not distributed or (distributed and rank == 0):
+                if freeze_text_encoder:
+                    print(f"\n=== Initializing CLIP text embeddings for step {step + 1}/{num_steps} ===")
+                else:
+                    print(f"\n=== Setting up CLIP class names for step {step + 1}/{num_steps} ===")
+
+            # Set class names for current step (incremental update)
+            # If text encoder is frozen: precomputes and caches embeddings
+            # If text encoder is trainable: only stores class names (embeddings computed in forward pass)
+            model_to_init.set_class_names(class_names=step_class_names, class_indices=all_step_classes[step])
+
+            if not distributed or (distributed and rank == 0):
+                if freeze_text_encoder:
+                    print(f"Cached text embeddings for {len(step_class_names)} classes: {step_class_names[:5]}...")
+                else:
+                    print(f"Stored class names for {len(step_class_names)} classes: {step_class_names[:5]}...")
+                    print("Text embeddings will be computed dynamically during forward pass")
+
         # Train or evaluate on current step
         start_time = time.time()
 

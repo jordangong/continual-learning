@@ -1,4 +1,4 @@
-name: ViT-B-16
+name: ViT-B-16-quickgelu
 source: openclip  # Options: timm, openclip
 pretrained: openai
 freeze_backbone: false  # Whether to freeze the backbone during training
