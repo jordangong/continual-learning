@@ -1,0 +1,22 @@
+name: ViT-B-16
+source: openclip  # Options: timm, openclip
+pretrained: laion400m_e32
+freeze_backbone: false  # Whether to freeze the backbone during training
+freeze_classifier: false  # Whether to freeze the classifier during training
+feature_dim: 768  # Feature dimension for ViT base
+skip_blocks: 0  # Number of final transformer blocks to skip
+skip_final_norm: false  # Whether to skip final norm layer after transformer blocks, before head
+skip_proj: true  # Whether to skip CLIP ViT projection head
+classifier:
+  type: linear  # Options: linear, mlp, prototypical
+  hidden_dim: 512  # Only used if type is mlp
+  dropout: 0.1
+  normalize: false
+  temperature: 1.0  # Temperature scaling parameter for logits (lower values make predictions more confident)
+  learnable_temperature: false  # Whether to make temperature a learnable parameter
+  use_log_temperature: false  # Whether to parameterize temperature in log space for better optimization stability
+sae:
+  use_sae: false
+  checkpoint_path: "/path/to/your/sae_checkpoint.pt"
+  layer: -2  # Apply SAE to the second-to-last transformer layer
+  token_type: all  # Apply SAE to 'patch', 'cls', or 'all'
