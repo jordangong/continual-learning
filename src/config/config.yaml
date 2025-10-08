@@ -13,7 +13,7 @@ defaults:
 # ======================================================
 # Experiment identification and naming
 experiment:
-  name: "${dataset.name}_${model.name}_${continual.strategy}_${now:%Y-%m-%d_%H-%M-%S}"
+  name: "${dataset.name}_${model.name}_${continual.strategy}_${now:%Y-%m-%d_%H-%M-%S-%f}"
 
 # ======================================================
 # SYSTEM SETTINGS
