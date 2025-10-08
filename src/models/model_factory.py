@@ -48,19 +48,31 @@ class CLIPTextEncoderWrapper(nn.Module):
         # Only return text-related parameters, not visual encoder
         for name, param in self.clip_model.named_parameters(recurse=recurse):
             # Exclude visual encoder and logit_scale (which is typically shared)
-            if not name.startswith("visual") and name != "logit_scale":
+            if (
+                not name.startswith("visual")
+                and name != "logit_scale"
+                and name != "logit_bias"
+            ):
                 yield param
-    
+
     def freeze(self):
         """Freeze text encoder parameters."""
         for name, param in self.clip_model.named_parameters():
-            if not name.startswith("visual") and name != "logit_scale":
+            if (
+                not name.startswith("visual")
+                and name != "logit_scale"
+                and name != "logit_bias"
+            ):
                 param.requires_grad = False
-    
+
     def unfreeze(self):
         """Unfreeze text encoder parameters."""
         for name, param in self.clip_model.named_parameters():
-            if not name.startswith("visual") and name != "logit_scale":
+            if (
+                not name.startswith("visual")
+                and name != "logit_scale"
+                and name != "logit_bias"
+            ):
                 param.requires_grad = True
 
 
@@ -120,6 +132,7 @@ class CLIPClassifier(nn.Module):
         dropout: float = 0.0,
         learnable_temperature: bool = False,
         use_log_temperature: bool = False,
+        learnable_logit_bias: bool = False,
         device: Optional[torch.device] = None,
     ):
         """
@@ -132,11 +145,10 @@ class CLIPClassifier(nn.Module):
             text_templates: List of prompt templates (e.g., "a photo of a {}")
             mode: Classification mode:
                 - "text": Use text encoder only (frozen or trainable based on freeze_text_encoder)
-                - "linear": Use learned linear classifier on visual features
-                - "hybrid": Combine text + linear (both can be trainable)
+                - "hybrid": Combine text + learned classifier (both can be trainable)
             temperature: Temperature scaling for logits (CLIP-style, higher = softer)
             normalize: Whether to normalize features
-            hybrid_weight: Weight for text vs learned in hybrid mode (0=linear, 1=text)
+            hybrid_weight: Weight for text vs learned in hybrid mode (0=learned, 1=text)
             ensemble_text: Average over multiple text templates
             freeze_text_encoder: Whether to freeze text encoder (True for zero-shot, False for training)
             learned_classifier_type: Type of learned classifier ("linear" or "mlp")
@@ -144,6 +156,7 @@ class CLIPClassifier(nn.Module):
             dropout: Dropout probability for MLP classifier
             learnable_temperature: Whether temperature should be learnable
             use_log_temperature: If learnable_temperature=True, parameterize in log space
+            learnable_logit_bias: Whether logit_bias should be learnable (only applies if CustomTextCLIP has logit_bias)
             device: Device to place text embeddings on
         """
         super().__init__()
@@ -157,6 +170,7 @@ class CLIPClassifier(nn.Module):
         self.ensemble_text = ensemble_text
         self.device = device if device is not None else torch.device("cpu")
         self.learned_classifier_type = learned_classifier_type
+        self.learnable_logit_bias = learnable_logit_bias
 
         # Temperature handling (similar to ClassifierHead)
         self.use_log_temperature = use_log_temperature
@@ -186,13 +200,24 @@ class CLIPClassifier(nn.Module):
         else:
             self.text_encoder.unfreeze()
 
+        # Check if underlying CLIP model has logit_bias (CustomTextCLIP support)
+        self.has_logit_bias = False
+        if hasattr(text_encoder, "clip_model") and hasattr(
+            text_encoder.clip_model, "logit_bias"
+        ):
+            self.has_logit_bias = text_encoder.clip_model.logit_bias is not None
+
+            # Control logit_bias trainability
+            if self.has_logit_bias:
+                text_encoder.clip_model.logit_bias.requires_grad = learnable_logit_bias
+
         # Initialize text embeddings buffer (will be set via set_class_names)
         # Note: When text encoder is trainable, embeddings are recomputed in forward pass
         self.register_buffer("text_embeddings", torch.zeros(num_classes, feature_dim))
         self.text_embeddings_initialized = False
 
-        # For linear and hybrid modes, create a learnable classifier
-        if self.mode in ["linear", "hybrid"]:
+        # For hybrid modes, create a learnable classifier
+        if self.mode == "hybrid":
             self.learned_classifier = _create_learned_classifier(
                 in_features=feature_dim,
                 num_classes=num_classes,
@@ -349,12 +374,14 @@ class CLIPClassifier(nn.Module):
 
             # Compute cosine similarity scaled by temperature
             logits = torch.matmul(x, text_embeddings.t())
-            return logits / temperature
+            logits = logits / temperature
 
-        elif self.mode == "linear":
-            # Standard learned classifier on visual features
-            logits = self.learned_classifier(x)
-            return logits / temperature
+            # Apply logit_bias if present (CustomTextCLIP support)
+            if self.has_logit_bias:
+                logit_bias = self.text_encoder.clip_model.logit_bias
+                logits = logits + logit_bias
+
+            return logits
 
         elif self.mode == "hybrid":
             # Combination of text and learned classifiers
@@ -375,6 +402,11 @@ class CLIPClassifier(nn.Module):
             # Text-based logits
             text_logits = torch.matmul(x_norm, text_embeddings.t()) / temperature
 
+            # Apply logit_bias if present (CustomTextCLIP support)
+            if self.has_logit_bias:
+                logit_bias = self.text_encoder.clip_model.logit_bias
+                text_logits = text_logits + logit_bias
+
             # Learned logits (with temperature scaling)
             learned_logits = self.learned_classifier(x) / temperature
 
@@ -383,6 +415,7 @@ class CLIPClassifier(nn.Module):
                 self.hybrid_weight * text_logits
                 + (1 - self.hybrid_weight) * learned_logits
             )
+
             return logits
 
         else:
@@ -697,6 +730,7 @@ class PretrainedModel(nn.Module):
             use_pretrained_temperature = classifier_config.get(
                 "use_pretrained_temperature", True
             )
+            learnable_logit_bias = classifier_config.get("learnable_logit_bias", False)
 
             # Extract CLIP's pre-trained temperature if requested
             if use_pretrained_temperature and hasattr(clip_model, "logit_scale"):
@@ -725,6 +759,7 @@ class PretrainedModel(nn.Module):
                 dropout=dropout,
                 learnable_temperature=learnable_temperature,
                 use_log_temperature=use_log_temperature,
+                learnable_logit_bias=learnable_logit_bias,
                 device=self.device,
             )
         else:
@@ -815,7 +850,14 @@ class PretrainedModel(nn.Module):
                     print(f"Removed projection layer in OpenCLIP {self.model_name}")
 
             # Get feature dimension (for CLIP models) - after potential modifications
-            feature_dim = model.visual.output_dim
+            # For OpenCLIP
+            if hasattr(model.visual, "output_dim"):
+                feature_dim = model.visual.output_dim
+            # For CustomTextCLIP
+            elif hasattr(model, "text") and hasattr(model.text, "output_dim"):
+                feature_dim = model.text.output_dim
+            else:
+                raise ValueError(f"Unsupported model: {self.model_name}")
 
             # Load SAE if configured
             if self.use_sae and hasattr(saev, "nn"):
@@ -839,7 +881,9 @@ class PretrainedModel(nn.Module):
                 # Wrap the full CLIP model's encode_text pipeline in a module
                 text_encoder = CLIPTextEncoderWrapper(model)
                 tokenizer = open_clip.get_tokenizer(self.model_name)
-                print(f"Loaded CLIP model with text encoder wrapper for {self.model_name}")
+                print(
+                    f"Loaded CLIP model with text encoder wrapper for {self.model_name}"
+                )
                 # Return full CLIP model for accessing logit_scale
                 return model.visual, feature_dim, text_encoder, tokenizer, model
             else:

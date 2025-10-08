@@ -11,7 +11,7 @@ skip_proj: false  # Keep projection to match text embedding dimension
 # CLIP text-based classifier configuration
 classifier:
   type: clip_text  # Use CLIP text encoder for classification
-  mode: text  # Options: text (text encoder only), linear (learned classifier), hybrid (both)
+  mode: text  # Options: text (text encoder only), hybrid (text + learned classifier)
 
   # Text prompt templates (use {} as placeholder for class name)
   text_templates:
@@ -28,6 +28,7 @@ classifier:
   use_pretrained_temperature: true  # Use CLIP's pre-trained logit_scale as temperature (recommended)
   learnable_temperature: false  # Make temperature a learnable parameter
   use_log_temperature: false  # If learnable_temperature=true, parameterize in log space
+  learnable_logit_bias: false  # Make logit_bias a learnable parameter (only for CustomTextCLIP models)
 
   # Hybrid mode settings (only used if mode: hybrid)
   hybrid_weight: 0.5  # Weight for text vs learned (0.0=learned only, 1.0=text only)
