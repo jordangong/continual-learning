@@ -591,7 +591,8 @@ class ContinualTrainer:
                 finally:
                     # Always restore original classifier state after evaluation
                     self._restore_classifier_state(original_classifier_state)
-                    print(f"{debug_prefix}Restored original classifier weights after evaluation")
+                    if original_classifier_state:
+                        print(f"{debug_prefix}Restored original classifier weights after evaluation")
 
                 # Log metrics
                 self._log_metrics(
