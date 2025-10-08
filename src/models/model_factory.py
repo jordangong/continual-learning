@@ -132,6 +132,7 @@ class CLIPClassifier(nn.Module):
         dropout: float = 0.0,
         learnable_temperature: bool = False,
         use_log_temperature: bool = False,
+        use_logit_bias: bool = False,
         learnable_logit_bias: bool = False,
         device: Optional[torch.device] = None,
     ):
@@ -156,7 +157,8 @@ class CLIPClassifier(nn.Module):
             dropout: Dropout probability for MLP classifier
             learnable_temperature: Whether temperature should be learnable
             use_log_temperature: If learnable_temperature=True, parameterize in log space
-            learnable_logit_bias: Whether logit_bias should be learnable (only applies if CustomTextCLIP has logit_bias)
+            use_logit_bias: Whether to use logit_bias if available (default False, only applies to CustomTextCLIP)
+            learnable_logit_bias: Whether logit_bias should be learnable (only if use_logit_bias=True)
             device: Device to place text embeddings on
         """
         super().__init__()
@@ -170,6 +172,7 @@ class CLIPClassifier(nn.Module):
         self.ensemble_text = ensemble_text
         self.device = device if device is not None else torch.device("cpu")
         self.learned_classifier_type = learned_classifier_type
+        self.use_logit_bias = use_logit_bias
         self.learnable_logit_bias = learnable_logit_bias
 
         # Temperature handling (similar to ClassifierHead)
@@ -202,8 +205,10 @@ class CLIPClassifier(nn.Module):
 
         # Check if underlying CLIP model has logit_bias (CustomTextCLIP support)
         self.has_logit_bias = False
-        if hasattr(text_encoder, "clip_model") and hasattr(
-            text_encoder.clip_model, "logit_bias"
+        if (
+            use_logit_bias
+            and hasattr(text_encoder, "clip_model")
+            and hasattr(text_encoder.clip_model, "logit_bias")
         ):
             self.has_logit_bias = text_encoder.clip_model.logit_bias is not None
 
@@ -730,6 +735,7 @@ class PretrainedModel(nn.Module):
             use_pretrained_temperature = classifier_config.get(
                 "use_pretrained_temperature", True
             )
+            use_logit_bias = classifier_config.get("use_logit_bias", False)
             learnable_logit_bias = classifier_config.get("learnable_logit_bias", False)
 
             # Extract CLIP's pre-trained temperature if requested
@@ -759,6 +765,7 @@ class PretrainedModel(nn.Module):
                 dropout=dropout,
                 learnable_temperature=learnable_temperature,
                 use_log_temperature=use_log_temperature,
+                use_logit_bias=use_logit_bias,
                 learnable_logit_bias=learnable_logit_bias,
                 device=self.device,
             )
