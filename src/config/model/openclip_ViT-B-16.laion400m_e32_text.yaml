@@ -28,8 +28,9 @@ classifier:
   use_pretrained_temperature: true  # Use CLIP's pre-trained logit_scale as temperature (recommended)
   learnable_temperature: false  # Make temperature a learnable parameter
   use_log_temperature: false  # If learnable_temperature=true, parameterize in log space
-  use_logit_bias: false  # Whether to use logit_bias (default False, only for CustomTextCLIP models)
-  learnable_logit_bias: false  # Make logit_bias a learnable parameter (only if use_logit_bias=true)
+  logit_bias: null  # Manual logit_bias value (only used if use_pretrained_logit_bias=false)
+  use_pretrained_logit_bias: false  # Use CLIP's pre-trained logit_bias (only for CustomTextCLIP models)
+  learnable_logit_bias: false  # Make logit_bias a learnable parameter
 
   # Hybrid mode settings (only used if mode: hybrid)
   hybrid_weight: 0.5  # Weight for text vs learned (0.0=learned only, 1.0=text only)

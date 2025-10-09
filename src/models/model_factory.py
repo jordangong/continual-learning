@@ -22,6 +22,9 @@ class CLIPTextEncoderWrapper(nn.Module):
     This wraps the full encode_text pipeline (token_embedding, positional_embedding,
     transformer, ln_final, text_projection) so it can be treated as a single module
     for freezing/unfreezing and forward passes.
+
+    Note: This wrapper only saves/loads text encoder parameters to avoid duplicating
+    the visual encoder in checkpoints.
     """
 
     def __init__(self, clip_model: nn.Module):
@@ -43,36 +46,79 @@ class CLIPTextEncoderWrapper(nn.Module):
         """
         return self.clip_model.encode_text(text_tokens, normalize=False)
 
+    def _is_text_parameter(self, name: str) -> bool:
+        """Check if a parameter name belongs to the text encoder.
+
+        Args:
+            name: Parameter name
+
+        Returns:
+            True if parameter belongs to text encoder, False otherwise
+        """
+        # Exclude visual encoder and shared parameters
+        return (
+            not name.startswith("visual")
+            and name != "logit_scale"
+            and name != "logit_bias"
+        )
+
+    def state_dict(self, *args, **kwargs):
+        """Return state dict with only text encoder parameters (no visual encoder)."""
+        # Get full state dict from clip_model
+        full_state_dict = self.clip_model.state_dict(*args, **kwargs)
+
+        # Filter to only include text encoder parameters
+        filtered_state_dict = {
+            f"clip_model.{k}": v
+            for k, v in full_state_dict.items()
+            if self._is_text_parameter(k)
+        }
+
+        return filtered_state_dict
+
+    def load_state_dict(self, state_dict, strict=True):
+        """Load state dict with only text encoder parameters.
+
+        Args:
+            state_dict: State dict to load (with 'clip_model.' prefix)
+            strict: Whether to strictly enforce key matching
+        """
+        # Remove 'clip_model.' prefix from keys
+        clip_state_dict = {
+            k.replace("clip_model.", "", 1): v
+            for k, v in state_dict.items()
+            if k.startswith("clip_model.")
+        }
+
+        # Load into clip_model with strict=False to allow missing visual encoder keys
+        return self.clip_model.load_state_dict(clip_state_dict, strict=False)
+
     def parameters(self, recurse: bool = True):
         """Return text encoder parameters (not visual encoder)."""
         # Only return text-related parameters, not visual encoder
         for name, param in self.clip_model.named_parameters(recurse=recurse):
-            # Exclude visual encoder and logit_scale (which is typically shared)
-            if (
-                not name.startswith("visual")
-                and name != "logit_scale"
-                and name != "logit_bias"
-            ):
+            if self._is_text_parameter(name):
                 yield param
+
+    def named_parameters(self, prefix: str = "", recurse: bool = True):
+        """Return named text encoder parameters (not visual encoder)."""
+        for name, param in self.clip_model.named_parameters(recurse=recurse):
+            if self._is_text_parameter(name):
+                full_name = (
+                    f"{prefix}clip_model.{name}" if prefix else f"clip_model.{name}"
+                )
+                yield full_name, param
 
     def freeze(self):
         """Freeze text encoder parameters."""
         for name, param in self.clip_model.named_parameters():
-            if (
-                not name.startswith("visual")
-                and name != "logit_scale"
-                and name != "logit_bias"
-            ):
+            if self._is_text_parameter(name):
                 param.requires_grad = False
 
     def unfreeze(self):
         """Unfreeze text encoder parameters."""
         for name, param in self.clip_model.named_parameters():
-            if (
-                not name.startswith("visual")
-                and name != "logit_scale"
-                and name != "logit_bias"
-            ):
+            if self._is_text_parameter(name):
                 param.requires_grad = True
 
 
@@ -132,7 +178,7 @@ class CLIPClassifier(nn.Module):
         dropout: float = 0.0,
         learnable_temperature: bool = False,
         use_log_temperature: bool = False,
-        use_logit_bias: bool = False,
+        logit_bias: Optional[float] = None,
         learnable_logit_bias: bool = False,
         device: Optional[torch.device] = None,
     ):
@@ -157,8 +203,8 @@ class CLIPClassifier(nn.Module):
             dropout: Dropout probability for MLP classifier
             learnable_temperature: Whether temperature should be learnable
             use_log_temperature: If learnable_temperature=True, parameterize in log space
-            use_logit_bias: Whether to use logit_bias if available (default False, only applies to CustomTextCLIP)
-            learnable_logit_bias: Whether logit_bias should be learnable (only if use_logit_bias=True)
+            logit_bias: Logit bias value (extracted from CLIP model, typically for CustomTextCLIP)
+            learnable_logit_bias: Whether logit_bias should be learnable
             device: Device to place text embeddings on
         """
         super().__init__()
@@ -172,8 +218,6 @@ class CLIPClassifier(nn.Module):
         self.ensemble_text = ensemble_text
         self.device = device if device is not None else torch.device("cpu")
         self.learned_classifier_type = learned_classifier_type
-        self.use_logit_bias = use_logit_bias
-        self.learnable_logit_bias = learnable_logit_bias
 
         # Temperature handling (similar to ClassifierHead)
         self.use_log_temperature = use_log_temperature
@@ -186,6 +230,15 @@ class CLIPClassifier(nn.Module):
                 self.temperature = nn.Parameter(torch.tensor(temperature))
         else:
             self.temperature = temperature
+
+        # Logit bias handling (extracted from CLIP model during initialization)
+        if logit_bias is not None:
+            if learnable_logit_bias:
+                self.logit_bias = nn.Parameter(torch.tensor(logit_bias))
+            else:
+                self.register_buffer("logit_bias", torch.tensor(logit_bias))
+        else:
+            self.logit_bias = None
 
         # Default text templates if not provided
         if text_templates is None:
@@ -202,19 +255,6 @@ class CLIPClassifier(nn.Module):
             self.text_encoder.freeze()
         else:
             self.text_encoder.unfreeze()
-
-        # Check if underlying CLIP model has logit_bias (CustomTextCLIP support)
-        self.has_logit_bias = False
-        if (
-            use_logit_bias
-            and hasattr(text_encoder, "clip_model")
-            and hasattr(text_encoder.clip_model, "logit_bias")
-        ):
-            self.has_logit_bias = text_encoder.clip_model.logit_bias is not None
-
-            # Control logit_bias trainability
-            if self.has_logit_bias:
-                text_encoder.clip_model.logit_bias.requires_grad = learnable_logit_bias
 
         # Initialize text embeddings buffer (will be set via set_class_names)
         # Note: When text encoder is trainable, embeddings are recomputed in forward pass
@@ -382,9 +422,8 @@ class CLIPClassifier(nn.Module):
             logits = logits * temperature
 
             # Apply logit_bias if present (CustomTextCLIP support)
-            if self.has_logit_bias:
-                logit_bias = self.text_encoder.clip_model.logit_bias
-                logits = logits + logit_bias
+            if self.logit_bias is not None:
+                logits = logits + self.logit_bias
 
             return logits
 
@@ -408,9 +447,8 @@ class CLIPClassifier(nn.Module):
             text_logits = torch.matmul(x_norm, text_embeddings.t()) * temperature
 
             # Apply logit_bias if present (CustomTextCLIP support)
-            if self.has_logit_bias:
-                logit_bias = self.text_encoder.clip_model.logit_bias
-                text_logits = text_logits + logit_bias
+            if self.logit_bias is not None:
+                text_logits = text_logits + self.logit_bias
 
             # Learned logits (with temperature scaling)
             learned_logits = self.learned_classifier(x) * temperature
@@ -735,7 +773,10 @@ class PretrainedModel(nn.Module):
             use_pretrained_temperature = classifier_config.get(
                 "use_pretrained_temperature", True
             )
-            use_logit_bias = classifier_config.get("use_logit_bias", False)
+            logit_bias = classifier_config.get("logit_bias", None)
+            use_pretrained_logit_bias = classifier_config.get(
+                "use_pretrained_logit_bias", False
+            )
             learnable_logit_bias = classifier_config.get("learnable_logit_bias", False)
 
             # Extract CLIP's pre-trained temperature if requested
@@ -747,6 +788,23 @@ class PretrainedModel(nn.Module):
                 print(
                     f"Warning: use_pretrained_temperature=True but model has no logit_scale. Using temperature={temperature}"
                 )
+            elif temperature is not None:
+                print(f"Using manually configured temperature: {temperature:.2f}")
+
+            # Extract CLIP's logit_bias if requested (CustomTextCLIP support)
+            if use_pretrained_logit_bias:
+                if (
+                    hasattr(clip_model, "logit_bias")
+                    and clip_model.logit_bias is not None
+                ):
+                    logit_bias = clip_model.logit_bias.item()
+                    print(f"Using CLIP pre-trained logit_bias: {logit_bias:.4f}")
+                else:
+                    print(
+                        f"Warning: use_pretrained_logit_bias=True but model has no logit_bias. Using logit_bias={logit_bias}"
+                    )
+            elif logit_bias is not None:
+                print(f"Using manually configured logit_bias: {logit_bias:.4f}")
 
             self.classifier = CLIPClassifier(
                 text_encoder=self.text_encoder,
@@ -765,7 +823,7 @@ class PretrainedModel(nn.Module):
                 dropout=dropout,
                 learnable_temperature=learnable_temperature,
                 use_log_temperature=use_log_temperature,
-                use_logit_bias=use_logit_bias,
+                logit_bias=logit_bias,
                 learnable_logit_bias=learnable_logit_bias,
                 device=self.device,
             )
