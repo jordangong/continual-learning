@@ -147,7 +147,7 @@ class CLIPClassifier(nn.Module):
             mode: Classification mode:
                 - "text": Use text encoder only (frozen or trainable based on freeze_text_encoder)
                 - "hybrid": Combine text + learned classifier (both can be trainable)
-            temperature: Temperature scaling for logits (CLIP-style, higher = softer)
+            temperature: Temperature scaling for logits (CLIP-style: multiply logits, typically exp(logit_scale) ≈ 100)
             normalize: Whether to normalize features
             hybrid_weight: Weight for text vs learned in hybrid mode (0=learned, 1=text)
             ensemble_text: Average over multiple text templates
@@ -377,9 +377,9 @@ class CLIPClassifier(nn.Module):
             if self.normalize:
                 x = F.normalize(x, p=2, dim=1)
 
-            # Compute cosine similarity scaled by temperature
+            # Compute cosine similarity scaled by temperature (CLIP-style: multiply by logit_scale.exp())
             logits = torch.matmul(x, text_embeddings.t())
-            logits = logits / temperature
+            logits = logits * temperature
 
             # Apply logit_bias if present (CustomTextCLIP support)
             if self.has_logit_bias:
@@ -405,7 +405,7 @@ class CLIPClassifier(nn.Module):
                 x_norm = x
 
             # Text-based logits
-            text_logits = torch.matmul(x_norm, text_embeddings.t()) / temperature
+            text_logits = torch.matmul(x_norm, text_embeddings.t()) * temperature
 
             # Apply logit_bias if present (CustomTextCLIP support)
             if self.has_logit_bias:
@@ -413,7 +413,7 @@ class CLIPClassifier(nn.Module):
                 text_logits = text_logits + logit_bias
 
             # Learned logits (with temperature scaling)
-            learned_logits = self.learned_classifier(x) / temperature
+            learned_logits = self.learned_classifier(x) * temperature
 
             # Weighted combination
             logits = (
