@@ -1,3 +1,4 @@
+import copy
 from typing import Any, Dict, List, Optional, Tuple
 
 import open_clip
@@ -33,6 +34,13 @@ class CLIPTextEncoderWrapper(nn.Module):
             clip_model: Full CLIP model with encode_text method
         """
         super().__init__()
+        clip_model = copy.deepcopy(clip_model)
+        if hasattr(clip_model, "visual"):
+            del clip_model.visual
+        if hasattr(clip_model, "logit_scale"):
+            del clip_model.logit_scale
+        if hasattr(clip_model, "logit_bias"):
+            del clip_model.logit_bias
         self.clip_model = clip_model
 
     def forward(self, text_tokens: torch.Tensor) -> torch.Tensor:
@@ -40,77 +48,10 @@ class CLIPTextEncoderWrapper(nn.Module):
 
         Args:
             text_tokens: Tokenized text [batch_size, sequence_length]
-
         Returns:
             Text embeddings [batch_size, feature_dim]
         """
         return self.clip_model.encode_text(text_tokens, normalize=False)
-
-    def _is_text_parameter(self, name: str) -> bool:
-        """Check if a parameter name belongs to the text encoder.
-
-        Args:
-            name: Parameter name
-
-        Returns:
-            True if parameter belongs to text encoder, False otherwise
-        """
-        # Exclude visual encoder and shared parameters
-        return (
-            not name.startswith("visual")
-            and name != "logit_scale"
-            and name != "logit_bias"
-        )
-
-    def state_dict(self, *args, **kwargs):
-        """Return state dict with only text encoder parameters (no visual encoder)."""
-        # Get full state dict from clip_model
-        full_state_dict = self.clip_model.state_dict(*args, **kwargs)
-
-        # Filter to only include text encoder parameters
-        filtered_state_dict = {
-            k: v for k, v in full_state_dict.items() if self._is_text_parameter(k)
-        }
-
-        return filtered_state_dict
-
-    def load_state_dict(self, state_dict, strict=True):
-        """Load state dict with only text encoder parameters.
-
-        Args:
-            state_dict: State dict to load (text encoder parameters only)
-            strict: Whether to strictly enforce key matching
-        """
-        # Load into clip_model with strict=False to allow missing visual encoder keys
-        return self.clip_model.load_state_dict(state_dict, strict=False)
-
-    def parameters(self, recurse: bool = True):
-        """Return text encoder parameters (not visual encoder)."""
-        # Only return text-related parameters, not visual encoder
-        for name, param in self.clip_model.named_parameters(recurse=recurse):
-            if self._is_text_parameter(name):
-                yield param
-
-    def named_parameters(self, prefix: str = "", recurse: bool = True):
-        """Return named text encoder parameters (not visual encoder)."""
-        for name, param in self.clip_model.named_parameters(recurse=recurse):
-            if self._is_text_parameter(name):
-                full_name = (
-                    f"{prefix}clip_model.{name}" if prefix else f"clip_model.{name}"
-                )
-                yield full_name, param
-
-    def freeze(self):
-        """Freeze text encoder parameters."""
-        for name, param in self.clip_model.named_parameters():
-            if self._is_text_parameter(name):
-                param.requires_grad = False
-
-    def unfreeze(self):
-        """Unfreeze text encoder parameters."""
-        for name, param in self.clip_model.named_parameters():
-            if self._is_text_parameter(name):
-                param.requires_grad = True
 
 
 def _create_learned_classifier(
@@ -243,9 +184,11 @@ class CLIPClassifier(nn.Module):
         # Control text encoder training
         self.freeze_text_encoder = freeze_text_encoder
         if freeze_text_encoder:
-            self.text_encoder.freeze()
+            for param in self.text_encoder.parameters():
+                param.requires_grad = False
         else:
-            self.text_encoder.unfreeze()
+            for param in self.text_encoder.parameters():
+                param.requires_grad = True
 
         # Initialize text embeddings buffer (will be set via set_class_names)
         # Note: When text encoder is trainable, embeddings are recomputed in forward pass
@@ -714,8 +657,6 @@ class PretrainedModel(nn.Module):
         use_log_temperature = classifier_config.get("use_log_temperature", False)
 
         # CLIP text encoder configuration
-        self.text_encoder = None
-        self.tokenizer = None
         self.use_text_encoder = (
             classifier_type == "clip_text" and self.source.lower() == "openclip"
         )
@@ -738,8 +679,8 @@ class PretrainedModel(nn.Module):
             (
                 self.backbone,
                 self.feature_dim,
-                self.text_encoder,
-                self.tokenizer,
+                text_encoder,
+                tokenizer,
                 clip_model,
             ) = self._load_backbone()
         else:
@@ -798,8 +739,8 @@ class PretrainedModel(nn.Module):
                 print(f"Using manually configured logit_bias: {logit_bias:.4f}")
 
             self.classifier = CLIPClassifier(
-                text_encoder=self.text_encoder,
-                tokenizer=self.tokenizer,
+                text_encoder=text_encoder,
+                tokenizer=tokenizer,
                 num_classes=num_classes,
                 feature_dim=self.feature_dim,
                 mode=mode,
