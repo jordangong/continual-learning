@@ -95,7 +95,9 @@ class CLIPTextEncoderWrapper(nn.Module):
         """Return named text encoder parameters (not visual encoder)."""
         for name, param in self.clip_model.named_parameters(recurse=recurse):
             if self._is_text_parameter(name):
-                full_name = f"{prefix}{name}" if prefix else name
+                full_name = (
+                    f"{prefix}clip_model.{name}" if prefix else f"clip_model.{name}"
+                )
                 yield full_name, param
 
     def freeze(self):
