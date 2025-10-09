@@ -69,9 +69,7 @@ class CLIPTextEncoderWrapper(nn.Module):
 
         # Filter to only include text encoder parameters
         filtered_state_dict = {
-            f"clip_model.{k}": v
-            for k, v in full_state_dict.items()
-            if self._is_text_parameter(k)
+            k: v for k, v in full_state_dict.items() if self._is_text_parameter(k)
         }
 
         return filtered_state_dict
@@ -80,18 +78,11 @@ class CLIPTextEncoderWrapper(nn.Module):
         """Load state dict with only text encoder parameters.
 
         Args:
-            state_dict: State dict to load (with 'clip_model.' prefix)
+            state_dict: State dict to load (text encoder parameters only)
             strict: Whether to strictly enforce key matching
         """
-        # Remove 'clip_model.' prefix from keys
-        clip_state_dict = {
-            k.replace("clip_model.", "", 1): v
-            for k, v in state_dict.items()
-            if k.startswith("clip_model.")
-        }
-
         # Load into clip_model with strict=False to allow missing visual encoder keys
-        return self.clip_model.load_state_dict(clip_state_dict, strict=False)
+        return self.clip_model.load_state_dict(state_dict, strict=False)
 
     def parameters(self, recurse: bool = True):
         """Return text encoder parameters (not visual encoder)."""
@@ -104,9 +95,7 @@ class CLIPTextEncoderWrapper(nn.Module):
         """Return named text encoder parameters (not visual encoder)."""
         for name, param in self.clip_model.named_parameters(recurse=recurse):
             if self._is_text_parameter(name):
-                full_name = (
-                    f"{prefix}clip_model.{name}" if prefix else f"clip_model.{name}"
-                )
+                full_name = f"{prefix}{name}" if prefix else name
                 yield full_name, param
 
     def freeze(self):
