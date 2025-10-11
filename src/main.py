@@ -183,9 +183,19 @@ def run_training(
         )
 
         # Initialize prototypes if using prototypical classifier
-        if (
-            not (eval_only and config["continual"]["strategy"] != "zeroshot")
-        ) and config["model"]["classifier"]["type"] == "prototypical":
+        # This includes:
+        # 1. Direct prototypical classifier (classifier.type == "prototypical")
+        # 2. CLIP hybrid mode with prototypical learned classifier (classifier.type == "clip_text", mode == "hybrid", learned_classifier_type == "prototypical")
+        is_prototypical = config["model"]["classifier"]["type"] == "prototypical"
+        is_clip_hybrid_prototypical = (
+            config["model"]["classifier"]["type"] == "clip_text"
+            and config["model"]["classifier"].get("mode", "text") == "hybrid"
+            and config["model"]["classifier"].get("learned_classifier_type", "linear") == "prototypical"
+        )
+
+        if (not (eval_only and config["continual"]["strategy"] != "zeroshot")) and (
+            is_prototypical or is_clip_hybrid_prototypical
+        ):
             # Only print on main process if distributed
             if not distributed or (distributed and rank == 0):
                 print(

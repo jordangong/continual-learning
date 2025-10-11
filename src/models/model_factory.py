@@ -60,18 +60,20 @@ def _create_learned_classifier(
     classifier_type: str = "linear",
     hidden_dim: Optional[int] = None,
     dropout: float = 0.0,
+    normalize: bool = False,
 ) -> nn.Module:
-    """Create a learned classifier (linear or MLP).
+    """Create a learned classifier (linear, MLP, or prototypical).
 
     Args:
         in_features: Input feature dimension
         num_classes: Number of output classes
-        classifier_type: "linear" or "mlp"
+        classifier_type: "linear", "mlp", or "prototypical"
         hidden_dim: Hidden dimension for MLP (required if classifier_type="mlp")
         dropout: Dropout probability for MLP
+        normalize: Whether to normalize features (for prototypical classifier)
 
     Returns:
-        nn.Module: Linear or MLP classifier
+        nn.Module: Linear, MLP, or Prototypical classifier
     """
     if classifier_type == "linear":
         return nn.Linear(in_features, num_classes)
@@ -84,6 +86,8 @@ def _create_learned_classifier(
             nn.Dropout(dropout),
             nn.Linear(hidden_dim, num_classes),
         )
+    elif classifier_type == "prototypical":
+        return PrototypicalClassifier(in_features, num_classes, normalize=normalize)
     else:
         raise ValueError(f"Unsupported classifier type: {classifier_type}")
 
@@ -203,6 +207,7 @@ class CLIPClassifier(nn.Module):
                 classifier_type=learned_classifier_type,
                 hidden_dim=hidden_dim,
                 dropout=dropout,
+                normalize=normalize,
             )
         else:
             self.learned_classifier = None
@@ -398,6 +403,21 @@ class CLIPClassifier(nn.Module):
         else:
             raise ValueError(f"Unsupported mode: {self.mode}")
 
+    def update_prototypes(self, features: torch.Tensor, labels: torch.Tensor) -> None:
+        """Update prototypes if using prototypical learned classifier in hybrid mode."""
+        if self.mode == "hybrid" and hasattr(self.learned_classifier, "update_prototypes"):
+            self.learned_classifier.update_prototypes(features, labels)
+
+    def compute_prototypes(
+        self,
+        features_list: List[torch.Tensor],
+        labels_list: List[torch.Tensor],
+        reset: bool = True,
+    ) -> None:
+        """Compute prototypes if using prototypical learned classifier in hybrid mode."""
+        if self.mode == "hybrid" and hasattr(self.learned_classifier, "compute_prototypes"):
+            self.learned_classifier.compute_prototypes(features_list, labels_list, reset)
+
 
 class PrototypicalClassifier(nn.Module):
     """Prototypical classifier using class prototypes for zero-shot classification."""
@@ -557,17 +577,14 @@ class ClassifierHead(nn.Module):
             self.temperature = temperature
 
         # Create classifier using shared function
-        if classifier_type in ["linear", "mlp"]:
+        if classifier_type in ["linear", "mlp", "prototypical"]:
             self.classifier = _create_learned_classifier(
                 in_features=in_features,
                 num_classes=num_classes,
                 classifier_type=classifier_type,
                 hidden_dim=hidden_dim,
                 dropout=dropout,
-            )
-        elif classifier_type == "prototypical":
-            self.classifier = PrototypicalClassifier(
-                in_features, num_classes, normalize=normalize
+                normalize=normalize,
             )
         elif classifier_type == "clip_text":
             # CLIP text-based classifier - requires text_encoder and tokenizer
