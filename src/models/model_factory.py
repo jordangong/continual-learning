@@ -116,6 +116,7 @@ class CLIPClassifier(nn.Module):
         use_log_temperature: bool = False,
         logit_bias: Optional[float] = None,
         learnable_logit_bias: bool = False,
+        learnable_hybrid_weight: bool = False,
         device: Optional[torch.device] = None,
     ):
         """
@@ -141,6 +142,7 @@ class CLIPClassifier(nn.Module):
             use_log_temperature: If learnable_temperature=True, parameterize in log space
             logit_bias: Logit bias value (extracted from CLIP model, typically for CustomTextCLIP)
             learnable_logit_bias: Whether logit_bias should be learnable
+            learnable_hybrid_weight: Whether hybrid_weight should be learnable (only used in hybrid mode)
             device: Device to place text embeddings on
         """
         super().__init__()
@@ -150,8 +152,13 @@ class CLIPClassifier(nn.Module):
         self.feature_dim = feature_dim
         self.mode = mode
         self.normalize = normalize
-        self.hybrid_weight = hybrid_weight
         self.ensemble_text = ensemble_text
+        
+        # Hybrid weight handling (for hybrid mode)
+        if learnable_hybrid_weight:
+            self.hybrid_weight = nn.Parameter(torch.tensor(hybrid_weight))
+        else:
+            self.hybrid_weight = hybrid_weight
         self.device = device if device is not None else torch.device("cpu")
         self.learned_classifier_type = learned_classifier_type
 
@@ -714,6 +721,7 @@ class PretrainedModel(nn.Module):
             mode = classifier_config.get("mode", "text")
             text_templates = classifier_config.get("text_templates", None)
             hybrid_weight = classifier_config.get("hybrid_weight", 0.5)
+            learnable_hybrid_weight = classifier_config.get("learnable_hybrid_weight", False)
             ensemble_text = classifier_config.get("ensemble_text", False)
             freeze_text_encoder = classifier_config.get("freeze_text_encoder", False)
             learned_classifier_type = classifier_config.get(
@@ -774,6 +782,7 @@ class PretrainedModel(nn.Module):
                 use_log_temperature=use_log_temperature,
                 logit_bias=logit_bias,
                 learnable_logit_bias=learnable_logit_bias,
+                learnable_hybrid_weight=learnable_hybrid_weight,
                 device=self.device,
             )
         else:
