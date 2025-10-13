@@ -41,6 +41,16 @@ classifier:
   hidden_dim: null  # Hidden dimension (required if learned_classifier_type=mlp)
   dropout: 0.0  # Dropout for MLP classifier
 
+  # Loss function settings
+  # Default: use_pretraining_loss=false -> standard cross-entropy loss
+  # For CLIP/SigLIP pretraining: set use_pretraining_loss=true
+  # Hybrid mode: supports pretraining loss but REQUIRES use_regular_loss=true
+  use_pretraining_loss: false  # Enable CLIP/SigLIP contrastive loss (within-batch)
+  pretraining_loss_type: "clip"  # Options: clip (ClipLoss), siglip (SigLipLoss)
+  pretraining_loss_weight: 1.0  # Weight for pretraining loss
+  use_regular_loss: false  # When use_pretraining_loss=true, also add standard cross-entropy (REQUIRED for hybrid mode)
+  regular_loss_weight: 1.0  # Weight for regular cross-entropy loss when using both
+
 sae:
   use_sae: false
   checkpoint_path: "/path/to/your/sae_checkpoint.pt"

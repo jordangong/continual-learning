@@ -15,6 +15,14 @@ from tqdm import tqdm
 
 from src.utils.metrics import forgetting
 
+# Import CLIP pretraining losses
+try:
+    from open_clip.loss import ClipLoss, SigLipLoss
+    CLIP_LOSSES_AVAILABLE = True
+except ImportError:
+    CLIP_LOSSES_AVAILABLE = False
+    ClipLoss, SigLipLoss = None, None  # Avoid lint warnings
+
 
 class ContinualTrainer:
     """Trainer for continual learning."""
@@ -182,6 +190,51 @@ class ContinualTrainer:
 
         # Setup criterion
         self.criterion = nn.CrossEntropyLoss()
+
+        # Setup pretraining loss (CLIP/SigLIP contrastive loss)
+        model_to_check = self.model.module if hasattr(self.model, "module") else self.model
+        self.use_pretraining_loss = getattr(model_to_check, "use_pretraining_loss", False)
+        self.pretraining_loss_type = getattr(model_to_check, "pretraining_loss_type", "clip")
+        self.pretraining_loss_weight = getattr(model_to_check, "pretraining_loss_weight", 1.0)
+        self.use_regular_loss = getattr(model_to_check, "use_regular_loss", False)
+        self.regular_loss_weight = getattr(model_to_check, "regular_loss_weight", 1.0)
+        self.pretraining_loss_fn = None
+
+        if self.use_pretraining_loss:
+            if not CLIP_LOSSES_AVAILABLE:
+                raise ImportError(
+                    "CLIP losses not available. Please install open_clip: pip install open-clip-torch"
+                )
+
+            # Initialize pretraining loss
+            if self.pretraining_loss_type.lower() == "clip":
+                self.pretraining_loss_fn = ClipLoss(
+                    local_loss=False,
+                    gather_with_grad=False,
+                    cache_labels=True,
+                    rank=self.local_rank if self.distributed else 0,
+                    world_size=dist.get_world_size() if self.distributed else 1,
+                )
+                if self.local_rank in [-1, 0]:
+                    print("Initialized ClipLoss for pretraining")
+            elif self.pretraining_loss_type.lower() == "siglip":
+                self.pretraining_loss_fn = SigLipLoss(
+                    cache_labels=True,
+                    rank=self.local_rank if self.distributed else 0,
+                    world_size=dist.get_world_size() if self.distributed else 1,
+                )
+                if self.local_rank in [-1, 0]:
+                    print("Initialized SigLipLoss for pretraining")
+            else:
+                raise ValueError(
+                    f"Unsupported pretraining_loss_type: {self.pretraining_loss_type}. "
+                    f"Choose 'clip' or 'siglip'."
+                )
+
+            if self.local_rank in [-1, 0]:
+                print(f"Pretraining loss weight: {self.pretraining_loss_weight}")
+                if self.use_regular_loss:
+                    print(f"Regular loss weight: {self.regular_loss_weight}")
 
         # Setup logging
         self.logging_config = config["logging"]
@@ -736,14 +789,17 @@ class ContinualTrainer:
                 with amp.autocast(
                     device_type=self.device_type, dtype=self.mixed_precision_dtype
                 ):
-                    # Forward pass
-                    outputs = self.model(inputs)
-
-                    # Apply logit masking if enabled
-                    outputs = self._apply_logit_masking(outputs, targets)
-
-                    # Compute loss
-                    loss = self.criterion(outputs, targets)
+                    # Compute loss based on configuration
+                    if self.use_pretraining_loss and self.use_regular_loss:
+                        # Combined: pretraining + regular loss
+                        loss, outputs = self._compute_combined_loss(inputs, targets)
+                    elif self.use_pretraining_loss:
+                        # Pure pretraining loss (CLIP/SigLIP contrastive)
+                        loss = self._compute_pretraining_loss(inputs, targets)
+                        outputs = None
+                    else:
+                        # Standard cross-entropy loss
+                        loss, outputs = self._compute_regular_loss(inputs, targets)
 
                     # Add EWC loss if needed
                     if (
@@ -821,14 +877,17 @@ class ContinualTrainer:
                         self._update_ema_teacher()
             else:
                 # Standard precision training
-                # Forward pass
-                outputs = self.model(inputs)
-
-                # Apply logit masking if enabled
-                outputs = self._apply_logit_masking(outputs, targets)
-
-                # Compute loss
-                loss = self.criterion(outputs, targets)
+                # Compute loss based on configuration
+                if self.use_pretraining_loss and self.use_regular_loss:
+                    # Combined: pretraining + regular loss
+                    loss, outputs = self._compute_combined_loss(inputs, targets)
+                elif self.use_pretraining_loss:
+                    # Pure pretraining loss (CLIP/SigLIP contrastive)
+                    loss = self._compute_pretraining_loss(inputs, targets)
+                    outputs = None
+                else:
+                    # Standard cross-entropy loss
+                    loss, outputs = self._compute_regular_loss(inputs, targets)
 
                 # Add EWC loss if needed
                 if (
@@ -876,6 +935,13 @@ class ContinualTrainer:
 
             # Update metrics
             total_loss += loss.item()
+
+            # Compute outputs for metrics if not already computed
+            # (only needed when using pure pretraining loss without regular loss)
+            if outputs is None:
+                with torch.no_grad():
+                    outputs = self.model(inputs)
+
             if self.entropy_prediction:
                 predicted = self._entropy_based_prediction(outputs)
             else:
@@ -1396,6 +1462,100 @@ class ContinualTrainer:
         masked_outputs[~combined_mask] = -torch.inf
 
         return masked_outputs
+
+    def _compute_regular_loss(
+        self,
+        inputs: torch.Tensor,
+        targets: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Compute regular cross-entropy loss with logit masking.
+
+        Args:
+            inputs: Input images [batch_size, C, H, W]
+            targets: Target class labels [batch_size]
+
+        Returns:
+            Tuple of (loss, outputs)
+        """
+        outputs = self.model(inputs)
+        outputs = self._apply_logit_masking(outputs, targets)
+        loss = self.criterion(outputs, targets)
+        return loss, outputs
+
+    def _compute_pretraining_loss(
+        self,
+        inputs: torch.Tensor,
+        targets: torch.Tensor,
+    ) -> torch.Tensor:
+        """Compute CLIP/SigLIP pretraining contrastive loss.
+
+        Args:
+            inputs: Input images [batch_size, C, H, W]
+            targets: Target class labels [batch_size]
+
+        Returns:
+            Pretraining loss scalar
+        """
+        # Get image and text features
+        model_to_use = self.model.module if hasattr(self.model, "module") else self.model
+        image_features, text_features = model_to_use.forward_for_pretraining_loss(
+            inputs, targets
+        )
+
+        # Get temperature/logit_scale from model
+        temperature = 1.0
+        if hasattr(model_to_use, "classifier"):
+            classifier = model_to_use.classifier
+            if hasattr(classifier, "use_log_temperature") and classifier.use_log_temperature:
+                if hasattr(classifier, "log_temperature"):
+                    temperature = torch.exp(classifier.log_temperature)
+            elif hasattr(classifier, "temperature"):
+                temp_param = classifier.temperature
+                if isinstance(temp_param, torch.Tensor):
+                    temperature = temp_param
+                else:
+                    temperature = torch.tensor(temp_param, device=self.device)
+
+        # Handle logit_bias if present (for CustomTextCLIP)
+        logit_bias = None
+        if hasattr(model_to_use, "classifier") and hasattr(model_to_use.classifier, "logit_bias"):
+            logit_bias = model_to_use.classifier.logit_bias
+
+        # Compute contrastive loss
+        loss = self.pretraining_loss_fn(
+            image_features, text_features, temperature, logit_bias
+        )
+        return loss
+
+    def _compute_combined_loss(
+        self,
+        inputs: torch.Tensor,
+        targets: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Compute combined loss (pretraining loss + regular loss).
+
+        This should only be called when both use_pretraining_loss and use_regular_loss are True.
+
+        Args:
+            inputs: Input images [batch_size, C, H, W]
+            targets: Target class labels [batch_size]
+
+        Returns:
+            Tuple of (total_loss, outputs)
+        """
+        # Compute pretraining loss
+        pretraining_loss = self._compute_pretraining_loss(inputs, targets)
+
+        # Compute regular cross-entropy loss
+        regular_loss, outputs = self._compute_regular_loss(inputs, targets)
+
+        # Combine with weights
+        total_loss = (
+            self.pretraining_loss_weight * pretraining_loss +
+            self.regular_loss_weight * regular_loss
+        )
+
+        return total_loss, outputs
 
     def _compute_ewc_loss(self) -> torch.Tensor:
         """

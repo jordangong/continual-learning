@@ -410,6 +410,49 @@ class CLIPClassifier(nn.Module):
         else:
             raise ValueError(f"Unsupported mode: {self.mode}")
 
+    def forward_for_pretraining_loss(
+        self, image_features: torch.Tensor, targets: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Forward pass for pretraining loss computation (CLIP/SigLIP contrastive loss).
+
+        This method returns normalized image features and text features for the target classes,
+        which can be used to compute CLIP-style contrastive loss within the batch.
+
+        Args:
+            image_features: Image features [batch_size, feature_dim]
+            targets: Target class labels [batch_size]
+
+        Returns:
+            Tuple of (normalized_image_features, normalized_text_features)
+            - normalized_image_features: [batch_size, feature_dim]
+            - normalized_text_features: [batch_size, feature_dim]
+        """
+        if self.mode not in ["text", "hybrid"]:
+            raise ValueError(
+                f"Pretraining loss only supported for mode='text' or 'hybrid', got mode='{self.mode}'."
+            )
+
+        if not self.text_embeddings_initialized:
+            raise RuntimeError(
+                "Text embeddings not initialized. Call set_class_names() first."
+            )
+
+        # Get text embeddings (recompute if text encoder is trainable)
+        if self.freeze_text_encoder:
+            all_text_embeddings = self.text_embeddings
+        else:
+            all_text_embeddings = self._compute_text_embeddings()
+
+        # Extract text embeddings for the target classes
+        # targets: [batch_size], text_features: [batch_size, feature_dim]
+        text_features = all_text_embeddings[targets]
+
+        # Normalize both image and text features (required for contrastive loss)
+        image_features_norm = F.normalize(image_features, p=2, dim=1)
+        text_features_norm = F.normalize(text_features, p=2, dim=1)
+
+        return image_features_norm, text_features_norm
+
     def update_prototypes(self, features: torch.Tensor, labels: torch.Tensor) -> None:
         """Update prototypes if using prototypical learned classifier in hybrid mode."""
         if self.mode == "hybrid" and hasattr(self.learned_classifier, "update_prototypes"):
@@ -685,6 +728,13 @@ class PretrainedModel(nn.Module):
             classifier_type == "clip_text" and self.source.lower() == "openclip"
         )
 
+        # Pretraining loss configuration (for CLIP models)
+        self.use_pretraining_loss = classifier_config.get("use_pretraining_loss", False)
+        self.pretraining_loss_type = classifier_config.get("pretraining_loss_type", "clip")
+        self.pretraining_loss_weight = classifier_config.get("pretraining_loss_weight", 1.0)
+        self.use_regular_loss = classifier_config.get("use_regular_loss", False)
+        self.regular_loss_weight = classifier_config.get("regular_loss_weight", 1.0)
+
         # SAE configuration
         self.sae_config = model_config.get("sae", {})
         self.use_sae = self.sae_config.get("use_sae", False)
@@ -785,6 +835,23 @@ class PretrainedModel(nn.Module):
                 learnable_hybrid_weight=learnable_hybrid_weight,
                 device=self.device,
             )
+
+            # Validate pretraining loss configuration
+            if self.use_pretraining_loss:
+                if mode == "hybrid" and not self.use_regular_loss:
+                    raise ValueError(
+                        "Hybrid mode with pretraining loss requires use_regular_loss=true "
+                        "because hybrid combines text embeddings with learned classifier."
+                    )
+                print(
+                    f"Using {self.pretraining_loss_type.upper()} pretraining loss "
+                    f"(weight={self.pretraining_loss_weight})"
+                )
+                if self.use_regular_loss:
+                    print(
+                        f"Also using regular cross-entropy loss "
+                        f"(weight={self.regular_loss_weight})"
+                    )
         else:
             # Create standard classifier
             self.classifier = ClassifierHead(
@@ -1037,6 +1104,32 @@ class PretrainedModel(nn.Module):
     def forward_features(self, x: torch.Tensor) -> torch.Tensor:
         """Extract features without classification."""
         return self.backbone(x)
+
+    def forward_for_pretraining_loss(
+        self, x: torch.Tensor, targets: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Forward pass for pretraining loss computation.
+
+        This method extracts image features and gets corresponding text features
+        for computing CLIP-style contrastive loss.
+
+        Args:
+            x: Input images [batch_size, C, H, W]
+            targets: Target class labels [batch_size]
+
+        Returns:
+            Tuple of (normalized_image_features, normalized_text_features)
+        """
+        if not self.use_text_encoder:
+            raise ValueError(
+                "forward_for_pretraining_loss only available for CLIP text-based classifiers"
+            )
+
+        # Extract image features
+        image_features = self.backbone(x)
+
+        # Get text features using the classifier
+        return self.classifier.forward_for_pretraining_loss(image_features, targets)
 
     def set_class_names(
         self, class_names: List[str], class_indices: Optional[List[int]] = None
