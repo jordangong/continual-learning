@@ -734,6 +734,7 @@ class PretrainedModel(nn.Module):
         self.pretraining_loss_weight = classifier_config.get("pretraining_loss_weight", 1.0)
         self.use_regular_loss = classifier_config.get("use_regular_loss", False)
         self.regular_loss_weight = classifier_config.get("regular_loss_weight", 1.0)
+        self.supervised_contrastive = classifier_config.get("supervised_contrastive", False)
 
         # SAE configuration
         self.sae_config = model_config.get("sae", {})

@@ -50,6 +50,7 @@ classifier:
   pretraining_loss_weight: 1.0  # Weight for pretraining loss
   use_regular_loss: false  # When use_pretraining_loss=true, also add standard cross-entropy (REQUIRED for hybrid mode)
   regular_loss_weight: 1.0  # Weight for regular cross-entropy loss when using both
+  supervised_contrastive: false  # Use supervised contrastive loss (treats same-class samples as positives)
 
 sae:
   use_sae: false

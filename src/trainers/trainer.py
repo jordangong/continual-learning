@@ -18,10 +18,15 @@ from src.utils.metrics import forgetting
 # Import CLIP pretraining losses
 try:
     from open_clip.loss import ClipLoss, SigLipLoss
+    from src.trainers.supervised_contrastive_loss import (
+        SupervisedClipLoss,
+        SupervisedSigLipLoss,
+    )
     CLIP_LOSSES_AVAILABLE = True
 except ImportError:
     CLIP_LOSSES_AVAILABLE = False
     ClipLoss, SigLipLoss = None, None  # Avoid lint warnings
+    SupervisedClipLoss, SupervisedSigLipLoss = None, None
 
 
 class ContinualTrainer:
@@ -198,6 +203,7 @@ class ContinualTrainer:
         self.pretraining_loss_weight = getattr(model_to_check, "pretraining_loss_weight", 1.0)
         self.use_regular_loss = getattr(model_to_check, "use_regular_loss", False)
         self.regular_loss_weight = getattr(model_to_check, "regular_loss_weight", 1.0)
+        self.supervised_contrastive = getattr(model_to_check, "supervised_contrastive", False)
         self.pretraining_loss_fn = None
 
         if self.use_pretraining_loss:
@@ -208,23 +214,44 @@ class ContinualTrainer:
 
             # Initialize pretraining loss
             if self.pretraining_loss_type.lower() == "clip":
-                self.pretraining_loss_fn = ClipLoss(
-                    local_loss=False,
-                    gather_with_grad=False,
-                    cache_labels=True,
-                    rank=self.local_rank if self.distributed else 0,
-                    world_size=dist.get_world_size() if self.distributed else 1,
-                )
-                if self.local_rank in [-1, 0]:
-                    print("Initialized ClipLoss for pretraining")
+                if self.supervised_contrastive:
+                    self.pretraining_loss_fn = SupervisedClipLoss(
+                        local_loss=False,
+                        gather_with_grad=False,
+                        cache_labels=True,
+                        rank=self.local_rank if self.distributed else 0,
+                        world_size=dist.get_world_size() if self.distributed else 1,
+                    )
+                    if self.local_rank in [-1, 0]:
+                        print("Initialized SupervisedClipLoss for pretraining (label-aware positives)")
+                else:
+                    self.pretraining_loss_fn = ClipLoss(
+                        local_loss=False,
+                        gather_with_grad=False,
+                        cache_labels=True,
+                        rank=self.local_rank if self.distributed else 0,
+                        world_size=dist.get_world_size() if self.distributed else 1,
+                    )
+                    if self.local_rank in [-1, 0]:
+                        print("Initialized ClipLoss for pretraining")
             elif self.pretraining_loss_type.lower() == "siglip":
-                self.pretraining_loss_fn = SigLipLoss(
-                    cache_labels=True,
-                    rank=self.local_rank if self.distributed else 0,
-                    world_size=dist.get_world_size() if self.distributed else 1,
-                )
-                if self.local_rank in [-1, 0]:
-                    print("Initialized SigLipLoss for pretraining")
+                if self.supervised_contrastive:
+                    self.pretraining_loss_fn = SupervisedSigLipLoss(
+                        cache_labels=True,
+                        rank=self.local_rank if self.distributed else 0,
+                        world_size=dist.get_world_size() if self.distributed else 1,
+                        dist_impl="gather",  # Use 'gather' for supervised mode
+                    )
+                    if self.local_rank in [-1, 0]:
+                        print("Initialized SupervisedSigLipLoss for pretraining (label-aware positives)")
+                else:
+                    self.pretraining_loss_fn = SigLipLoss(
+                        cache_labels=True,
+                        rank=self.local_rank if self.distributed else 0,
+                        world_size=dist.get_world_size() if self.distributed else 1,
+                    )
+                    if self.local_rank in [-1, 0]:
+                        print("Initialized SigLipLoss for pretraining")
             else:
                 raise ValueError(
                     f"Unsupported pretraining_loss_type: {self.pretraining_loss_type}. "
@@ -1521,10 +1548,17 @@ class ContinualTrainer:
         if hasattr(model_to_use, "classifier") and hasattr(model_to_use.classifier, "logit_bias"):
             logit_bias = model_to_use.classifier.logit_bias
 
-        # Compute contrastive loss
-        loss = self.pretraining_loss_fn(
-            image_features, text_features, temperature, logit_bias
-        )
+        # Compute contrastive loss (with optional label-aware positives)
+        if self.supervised_contrastive:
+            # Pass labels to supervised loss
+            loss = self.pretraining_loss_fn(
+                image_features, text_features, temperature, logit_bias, labels=targets
+            )
+        else:
+            # Standard loss (diagonal positives only)
+            loss = self.pretraining_loss_fn(
+                image_features, text_features, temperature, logit_bias
+            )
         return loss
 
     def _compute_combined_loss(
