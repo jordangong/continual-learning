@@ -731,10 +731,23 @@ class PretrainedModel(nn.Module):
         # Pretraining loss configuration (for CLIP models)
         self.use_pretraining_loss = classifier_config.get("use_pretraining_loss", False)
         self.pretraining_loss_type = classifier_config.get("pretraining_loss_type", "clip")
-        self.pretraining_loss_weight = classifier_config.get("pretraining_loss_weight", 1.0)
+        pretraining_loss_weight = classifier_config.get("pretraining_loss_weight", 1.0)
+        learnable_pretraining_loss_weight = classifier_config.get("learnable_pretraining_loss_weight", False)
         self.use_regular_loss = classifier_config.get("use_regular_loss", False)
-        self.regular_loss_weight = classifier_config.get("regular_loss_weight", 1.0)
+        regular_loss_weight = classifier_config.get("regular_loss_weight", 1.0)
+        learnable_regular_loss_weight = classifier_config.get("learnable_regular_loss_weight", False)
         self.supervised_contrastive = classifier_config.get("supervised_contrastive", False)
+
+        # Make loss weights learnable if specified
+        if learnable_pretraining_loss_weight:
+            self.pretraining_loss_weight = nn.Parameter(torch.tensor(pretraining_loss_weight))
+        else:
+            self.pretraining_loss_weight = pretraining_loss_weight
+
+        if learnable_regular_loss_weight:
+            self.regular_loss_weight = nn.Parameter(torch.tensor(regular_loss_weight))
+        else:
+            self.regular_loss_weight = regular_loss_weight
 
         # SAE configuration
         self.sae_config = model_config.get("sae", {})
@@ -844,14 +857,18 @@ class PretrainedModel(nn.Module):
                         "Hybrid mode with pretraining loss requires use_regular_loss=true "
                         "because hybrid combines text embeddings with learned classifier."
                     )
+                weight_str = f"{self.pretraining_loss_weight.item() if isinstance(self.pretraining_loss_weight, nn.Parameter) else self.pretraining_loss_weight}"
+                learnable_str = " (learnable)" if isinstance(self.pretraining_loss_weight, nn.Parameter) else ""
                 print(
                     f"Using {self.pretraining_loss_type.upper()} pretraining loss "
-                    f"(weight={self.pretraining_loss_weight})"
+                    f"(weight={weight_str}{learnable_str})"
                 )
                 if self.use_regular_loss:
+                    reg_weight_str = f"{self.regular_loss_weight.item() if isinstance(self.regular_loss_weight, nn.Parameter) else self.regular_loss_weight}"
+                    reg_learnable_str = " (learnable)" if isinstance(self.regular_loss_weight, nn.Parameter) else ""
                     print(
                         f"Also using regular cross-entropy loss "
-                        f"(weight={self.regular_loss_weight})"
+                        f"(weight={reg_weight_str}{reg_learnable_str})"
                     )
         else:
             # Create standard classifier
