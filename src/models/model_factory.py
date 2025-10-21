@@ -306,7 +306,7 @@ class CLIPClassifier(nn.Module):
         Returns:
             Text embeddings tensor [num_classes, feature_dim]
         """
-        if not hasattr(self, "_class_names") or self._class_names[0] is None:
+        if not hasattr(self, "_class_names") or all(name is None for name in self._class_names):
             # Fallback to cached embeddings if class names not stored
             return self.text_embeddings
 
