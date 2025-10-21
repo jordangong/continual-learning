@@ -62,6 +62,8 @@ class ContinualDataset:
         self.num_classes = None
         self.class_order = None
         self.class_names = None
+        self.classes = None
+        self.class_to_idx = None
 
         # Cache for dataset indices by class
         self._class_indices_cache = {}
@@ -340,17 +342,17 @@ class ContinualDataset:
             IndexError: If class indices are out of bounds
         """
         if self.class_names is None:
-            # Try to get class names from dataset
-            if hasattr(self.dataset_train, "classes"):
-                self.class_names = self.dataset_train.classes
-            elif hasattr(self.dataset_train, "class_to_idx"):
+            # Try to get class names from self.classes or self.class_to_idx
+            if self.classes is not None:
+                self.class_names = self.classes
+            elif self.class_to_idx is not None:
                 # Create class names from class_to_idx mapping
-                idx_to_class = {v: k for k, v in self.dataset_train.class_to_idx.items()}
+                idx_to_class = {v: k for k, v in self.class_to_idx.items()}
                 self.class_names = [idx_to_class[i] for i in range(len(idx_to_class))]
             else:
                 # Cannot extract class names - this is a critical error
                 raise ValueError(
-                    f"Cannot extract class names from dataset {type(self.dataset_train).__name__}. "
+                    f"Cannot extract class names from dataset {type(self).__name__}. "
                     f"Dataset must have either 'classes' or 'class_to_idx' attribute. "
                     f"This is required for text-based classifiers (e.g., CLIP)."
                 )
@@ -430,6 +432,10 @@ class CIFAR100CL(ContinualDataset):
             download=self.download,
         )
 
+        # Set classes and class_to_idx from the train dataset
+        self.classes = self.dataset_train.classes
+        self.class_to_idx = self.dataset_train.class_to_idx
+
 
 class CUB200CL(ContinualDataset):
     """CUB-200-2011 dataset for continual learning."""
@@ -485,6 +491,22 @@ class CUB200CL(ContinualDataset):
                 "Please download from https://www.vision.caltech.edu/datasets/cub_200_2011/ "
                 "and extract to {}".format(dataset_path)
             )
+
+        # Load class names from classes.txt
+        # Format: "1 001.Black_footed_Albatross" -> extract "Black_footed_Albatross"
+        classes_file = os.path.join(dataset_path, "classes.txt")
+        self.classes = []
+        with open(classes_file, "r") as f:
+            for line in f:
+                # Parse format: "1 001.Black_footed_Albatross"
+                parts = line.strip().split()
+                if len(parts) >= 2:
+                    # Remove the numeric prefix (e.g., "001.") from class name
+                    class_name = parts[1].split('.', 1)[1] if '.' in parts[1] else parts[1]
+                    self.classes.append(class_name)
+
+        # Create class_to_idx mapping
+        self.class_to_idx = {class_name: idx for idx, class_name in enumerate(self.classes)}
 
         # Setup train/test split (use the standard split from the dataset)
         images_path = os.path.join(dataset_path, "images")
@@ -542,7 +564,10 @@ class CUB200CL(ContinualDataset):
 
 
 class Caltech256CL(ContinualDataset):
-    """Caltech256 dataset for continual learning."""
+    """Caltech256 dataset for continual learning.
+
+    TODO: Add classes and class_to_idx attributes for text-based classifiers (e.g., CLIP).
+    """
 
     def __init__(
         self,
@@ -631,7 +656,10 @@ class TransformSubset(Dataset):
 
 
 class StanfordCarsCL(ContinualDataset):
-    """Stanford Cars dataset for continual learning."""
+    """Stanford Cars dataset for continual learning.
+
+    TODO: Add classes and class_to_idx attributes for text-based classifiers (e.g., CLIP).
+    """
 
     def __init__(
         self,
@@ -744,10 +772,29 @@ class ImageNetRCL(ContinualDataset):
                 "and extract to {}".format(dataset_path)
             )
 
+        # Load class names from README.txt
+        # Format: "n01443537 goldfish" starting from line 14
+        readme_file = os.path.join(dataset_path, "README.txt")
+        synset_to_name = {}
+        with open(readme_file, "r") as f:
+            lines = f.readlines()
+            # Class names start at line 14 (index 13)
+            for line in lines[13:]:
+                parts = line.strip().split()
+                if len(parts) >= 2 and parts[0].startswith('n'):
+                    synset_id = parts[0]
+                    class_name = '_'.join(parts[1:])  # Join in case class name has spaces
+                    synset_to_name[synset_id] = class_name
+
         # ImageNet-R follows the ImageFolder structure, but doesn't have a train/test split
         # We'll create our own split
         train_dataset = ImageFolder(dataset_path, transform=self.transform)
         test_dataset = ImageFolder(dataset_path, transform=self.test_transform)
+
+        # Map ImageFolder classes (synset IDs) to human-readable names
+        # ImageFolder.classes contains directory names (synset IDs) in sorted order
+        self.classes = [synset_to_name.get(synset_id, synset_id) for synset_id in train_dataset.classes]
+        self.class_to_idx = {class_name: idx for idx, class_name in enumerate(self.classes)}
 
         # Create train/test split
         class_indices = defaultdict(list)
@@ -770,7 +817,11 @@ class ImageNetRCL(ContinualDataset):
 
 
 class ImageNetACL(ContinualDataset):
-    """ImageNet-A dataset for continual learning."""
+    """ImageNet-A dataset for continual learning.
+
+    TODO: Add classes and class_to_idx attributes for text-based classifiers (e.g., CLIP).
+    Similar to ImageNetRCL, needs to map synset IDs to human-readable names.
+    """
 
     def __init__(
         self,
@@ -849,6 +900,8 @@ class ImageNetACL(ContinualDataset):
 
 class DomainNetCL(ContinualDataset):
     """DomainNet dataset for continual learning.
+
+    TODO: Add classes and class_to_idx attributes for text-based classifiers (e.g., CLIP).
 
     Supports both class-incremental and domain-incremental learning.
 
@@ -1095,7 +1148,10 @@ class DomainNetCL(ContinualDataset):
 
 
 class ObjectNetCL(ContinualDataset):
-    """ObjectNet dataset for continual learning."""
+    """ObjectNet dataset for continual learning.
+
+    TODO: Add classes and class_to_idx attributes for text-based classifiers (e.g., CLIP).
+    """
 
     def __init__(
         self,
@@ -1201,6 +1257,8 @@ class ObjectNetCL(ContinualDataset):
 
 class ObjectNet200CL(ContinualDataset):
     """ObjectNet-200 dataset for continual learning.
+
+    TODO: Add classes and class_to_idx attributes for text-based classifiers (e.g., CLIP).
 
     This class implements a subset of ObjectNet with 200 classes, using provided split files.
     """
@@ -1322,6 +1380,8 @@ class ObjectNet200CL(ContinualDataset):
 
 class OmniBenchCL(ContinualDataset):
     """OmniBench dataset for continual learning.
+
+    TODO: Add classes and class_to_idx attributes for text-based classifiers (e.g., CLIP).
 
     Based on the OmniBenchmark dataset: https://github.com/ZhangYuanhan-AI/OmniBenchmark
     """
@@ -1639,6 +1699,8 @@ class OmniBenchCL(ContinualDataset):
 class OmniBench300CL(ContinualDataset):
     """OmniBench 300-class subset for continual learning.
 
+    TODO: Add classes and class_to_idx attributes for text-based classifiers (e.g., CLIP).
+
     This class implements a subset of OmniBenchmark with 300 classes,
     using provided split files in data/omnibenchmark-300.
     """
@@ -1841,7 +1903,10 @@ class OmniBench300CL(ContinualDataset):
 
 
 class VTABCL(ContinualDataset):
-    """Visual Task Adaptation Benchmark (VTAB) for continual learning."""
+    """Visual Task Adaptation Benchmark (VTAB) for continual learning.
+
+    TODO: Add classes and class_to_idx attributes for text-based classifiers (e.g., CLIP).
+    """
 
     def __init__(
         self,
