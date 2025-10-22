@@ -720,6 +720,211 @@ class StanfordCarsCL(ContinualDataset):
         self.class_to_idx = self.dataset_train.class_to_idx
 
 
+class Food101CL(ContinualDataset):
+    """Food-101 dataset for continual learning."""
+
+    def __init__(
+        self,
+        root: str,
+        num_steps: int,
+        classes_per_step: int,
+        transform: Optional[Callable] = None,
+        test_transform: Optional[Callable] = None,
+        target_transform: Optional[Callable] = None,
+        download: bool = True,
+        seed: int = 42,
+        class_order: Optional[List[int]] = None,
+    ):
+        super().__init__(
+            root=root,
+            num_steps=num_steps,
+            classes_per_step=classes_per_step,
+            transform=transform,
+            test_transform=test_transform,
+            target_transform=target_transform,
+            download=download,
+            seed=seed,
+        )
+
+        # Food-101 has 101 classes
+        self.num_classes = 101
+
+        # Set class order (either provided or random)
+        if class_order is None:
+            self.class_order = list(range(self.num_classes))
+            np.random.shuffle(self.class_order)
+        else:
+            assert len(class_order) == self.num_classes, (
+                "Class order must contain all classes"
+            )
+            self.class_order = class_order
+
+        self.setup()
+
+    def setup(self):
+        """Setup Food-101 dataset."""
+        # Load the train and test datasets
+        self.dataset_train = tv_datasets.Food101(
+            root=self.root,
+            split="train",
+            transform=self.transform,
+            target_transform=self.target_transform,
+            download=self.download,
+        )
+
+        self.dataset_test = tv_datasets.Food101(
+            root=self.root,
+            split="test",
+            transform=self.test_transform,
+            target_transform=self.target_transform,
+            download=self.download,
+        )
+
+        # Set classes and class_to_idx from the train dataset
+        self.classes = self.dataset_train.classes
+        self.class_to_idx = self.dataset_train.class_to_idx
+
+
+class OxfordIIITPetCL(ContinualDataset):
+    """Oxford-IIIT Pet dataset for continual learning."""
+
+    def __init__(
+        self,
+        root: str,
+        num_steps: int,
+        classes_per_step: int,
+        transform: Optional[Callable] = None,
+        test_transform: Optional[Callable] = None,
+        target_transform: Optional[Callable] = None,
+        download: bool = True,
+        seed: int = 42,
+        class_order: Optional[List[int]] = None,
+    ):
+        super().__init__(
+            root=root,
+            num_steps=num_steps,
+            classes_per_step=classes_per_step,
+            transform=transform,
+            test_transform=test_transform,
+            target_transform=target_transform,
+            download=download,
+            seed=seed,
+        )
+
+        # Oxford-IIIT Pet has 37 classes
+        self.num_classes = 37
+
+        # Set class order (either provided or random)
+        if class_order is None:
+            self.class_order = list(range(self.num_classes))
+            np.random.shuffle(self.class_order)
+        else:
+            assert len(class_order) == self.num_classes, (
+                "Class order must contain all classes"
+            )
+            self.class_order = class_order
+
+        self.setup()
+
+    def setup(self):
+        """Setup Oxford-IIIT Pet dataset."""
+        # Load the train and test datasets
+        self.dataset_train = tv_datasets.OxfordIIITPet(
+            root=self.root,
+            split="trainval",
+            transform=self.transform,
+            target_transform=self.target_transform,
+            download=self.download,
+        )
+
+        self.dataset_test = tv_datasets.OxfordIIITPet(
+            root=self.root,
+            split="test",
+            transform=self.test_transform,
+            target_transform=self.target_transform,
+            download=self.download,
+        )
+
+        # Set classes and class_to_idx from the train dataset
+        self.classes = self.dataset_train.classes
+        self.class_to_idx = self.dataset_train.class_to_idx
+
+
+class FGVCAircraftCL(ContinualDataset):
+    """FGVC Aircraft dataset for continual learning."""
+
+    def __init__(
+        self,
+        root: str,
+        num_steps: int,
+        classes_per_step: int,
+        transform: Optional[Callable] = None,
+        test_transform: Optional[Callable] = None,
+        target_transform: Optional[Callable] = None,
+        download: bool = True,
+        seed: int = 42,
+        class_order: Optional[List[int]] = None,
+        annotation_level: str = "variant",
+    ):
+        super().__init__(
+            root=root,
+            num_steps=num_steps,
+            classes_per_step=classes_per_step,
+            transform=transform,
+            test_transform=test_transform,
+            target_transform=target_transform,
+            download=download,
+            seed=seed,
+        )
+
+        self.annotation_level = annotation_level
+
+        # FGVC Aircraft has different number of classes based on annotation level
+        annotation_level_classes = {
+            "variant": 100,
+            "family": 70,
+            "manufacturer": 30,
+        }
+        self.num_classes = annotation_level_classes[annotation_level]
+
+        # Set class order (either provided or random)
+        if class_order is None:
+            self.class_order = list(range(self.num_classes))
+            np.random.shuffle(self.class_order)
+        else:
+            assert len(class_order) == self.num_classes, (
+                "Class order must contain all classes"
+            )
+            self.class_order = class_order
+
+        self.setup()
+
+    def setup(self):
+        """Setup FGVC Aircraft dataset."""
+        # Load the train and test datasets
+        self.dataset_train = tv_datasets.FGVCAircraft(
+            root=self.root,
+            split="trainval",
+            annotation_level=self.annotation_level,
+            transform=self.transform,
+            target_transform=self.target_transform,
+            download=self.download,
+        )
+
+        self.dataset_test = tv_datasets.FGVCAircraft(
+            root=self.root,
+            split="test",
+            annotation_level=self.annotation_level,
+            transform=self.test_transform,
+            target_transform=self.target_transform,
+            download=self.download,
+        )
+
+        # Set classes and class_to_idx from the train dataset
+        self.classes = self.dataset_train.classes
+        self.class_to_idx = self.dataset_train.class_to_idx
+
+
 class ImageNetRCL(ContinualDataset):
     """ImageNet-R dataset for continual learning."""
 

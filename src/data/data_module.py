@@ -11,6 +11,8 @@ from src.data.datasets import (
     VTABCL,
     Caltech256CL,
     DomainNetCL,
+    FGVCAircraftCL,
+    Food101CL,
     ImageNetACL,
     ImageNetRCL,
     MergedTaskDataset,
@@ -18,6 +20,7 @@ from src.data.datasets import (
     ObjectNetCL,
     OmniBench300CL,
     OmniBenchCL,
+    OxfordIIITPetCL,
     StanfordCarsCL,
 )
 from src.data.transforms import get_transforms
@@ -241,6 +244,40 @@ class DataModule:
                 target_transform=None,
                 download=False,
                 seed=self.config["seed"],
+            )
+        elif dataset_name == "food101":
+            self.dataset = Food101CL(
+                root=self.data_dir,
+                num_steps=self.continual_config["num_steps"],
+                classes_per_step=self.continual_config["classes_per_step"],
+                transform=self.train_transform,
+                test_transform=self.test_transform,
+                target_transform=None,
+                download=True,
+                seed=self.config["seed"],
+            )
+        elif dataset_name == "oxford_pet":
+            self.dataset = OxfordIIITPetCL(
+                root=self.data_dir,
+                num_steps=self.continual_config["num_steps"],
+                classes_per_step=self.continual_config["classes_per_step"],
+                transform=self.train_transform,
+                test_transform=self.test_transform,
+                target_transform=None,
+                download=True,
+                seed=self.config["seed"],
+            )
+        elif dataset_name == "fgvc_aircraft":
+            self.dataset = FGVCAircraftCL(
+                root=self.data_dir,
+                num_steps=self.continual_config["num_steps"],
+                classes_per_step=self.continual_config["classes_per_step"],
+                transform=self.train_transform,
+                test_transform=self.test_transform,
+                target_transform=None,
+                download=True,
+                seed=self.config["seed"],
+                annotation_level=self.dataset_config.get("annotation_level", "variant"),
             )
         elif dataset_name == "imagenet-r":
             self.dataset = ImageNetRCL(
