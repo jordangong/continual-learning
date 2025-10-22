@@ -656,10 +656,7 @@ class TransformSubset(Dataset):
 
 
 class StanfordCarsCL(ContinualDataset):
-    """Stanford Cars dataset for continual learning.
-
-    TODO: Add classes and class_to_idx attributes for text-based classifiers (e.g., CLIP).
-    """
+    """Stanford Cars dataset for continual learning."""
 
     def __init__(
         self,
@@ -717,6 +714,10 @@ class StanfordCarsCL(ContinualDataset):
             target_transform=self.target_transform,
             download=self.download,
         )
+
+        # Set classes and class_to_idx from the train dataset
+        self.classes = self.dataset_train.classes
+        self.class_to_idx = self.dataset_train.class_to_idx
 
 
 class ImageNetRCL(ContinualDataset):
@@ -817,11 +818,7 @@ class ImageNetRCL(ContinualDataset):
 
 
 class ImageNetACL(ContinualDataset):
-    """ImageNet-A dataset for continual learning.
-
-    TODO: Add classes and class_to_idx attributes for text-based classifiers (e.g., CLIP).
-    Similar to ImageNetRCL, needs to map synset IDs to human-readable names.
-    """
+    """ImageNet-A dataset for continual learning."""
 
     def __init__(
         self,
@@ -873,10 +870,29 @@ class ImageNetACL(ContinualDataset):
                 "and extract to {}".format(dataset_path)
             )
 
+        # Load class names from README.txt
+        # Format: "n01498041 stingray" starting from line 13
+        readme_file = os.path.join(dataset_path, "README.txt")
+        synset_to_name = {}
+        with open(readme_file, "r") as f:
+            lines = f.readlines()
+            # Class names start at line 13 (index 12)
+            for line in lines[12:]:
+                parts = line.strip().split(maxsplit=1)  # Split only on first space
+                if len(parts) >= 2 and parts[0].startswith('n'):
+                    synset_id = parts[0]
+                    class_name = parts[1].replace(' ', '_')  # Replace spaces with underscores
+                    synset_to_name[synset_id] = class_name
+
         # ImageNet-A follows the ImageFolder structure, but doesn't have a train/test split
         # We'll create our own split
         train_dataset = ImageFolder(dataset_path, transform=self.transform)
         test_dataset = ImageFolder(dataset_path, transform=self.test_transform)
+
+        # Map ImageFolder classes (synset IDs) to human-readable names
+        # ImageFolder.classes contains directory names (synset IDs) in sorted order
+        self.classes = [synset_to_name.get(synset_id, synset_id) for synset_id in train_dataset.classes]
+        self.class_to_idx = {class_name: idx for idx, class_name in enumerate(self.classes)}
 
         # Create train/test split
         class_indices = defaultdict(list)
