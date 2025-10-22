@@ -17,6 +17,9 @@ classifier:
   text_templates:
     - "a photo of a {}."
     - "a photo of the {}."
+  
+  # Class name preprocessing
+  normalize_class_names: false  # Replace underscores with spaces in class names (e.g., "Black_billed_Cuckoo" -> "Black billed Cuckoo")
 
   # Text encoder settings
   freeze_text_encoder: true  # True=zero-shot (frozen), False=train text encoder

@@ -117,6 +117,7 @@ class CLIPClassifier(nn.Module):
         logit_bias: Optional[float] = None,
         learnable_logit_bias: bool = False,
         learnable_hybrid_weight: bool = False,
+        normalize_class_names: bool = False,
         device: Optional[torch.device] = None,
     ):
         """
@@ -143,6 +144,7 @@ class CLIPClassifier(nn.Module):
             logit_bias: Logit bias value (extracted from CLIP model, typically for CustomTextCLIP)
             learnable_logit_bias: Whether logit_bias should be learnable
             learnable_hybrid_weight: Whether hybrid_weight should be learnable (only used in hybrid mode)
+            normalize_class_names: Replace underscores with spaces in class names before creating prompts
             device: Device to place text embeddings on
         """
         super().__init__()
@@ -153,6 +155,7 @@ class CLIPClassifier(nn.Module):
         self.mode = mode
         self.normalize = normalize
         self.ensemble_text = ensemble_text
+        self.normalize_class_names = normalize_class_names
         
         # Hybrid weight handling (for hybrid mode)
         if learnable_hybrid_weight:
@@ -267,6 +270,10 @@ class CLIPClassifier(nn.Module):
         """
         if not class_names:
             return torch.empty(0, self.feature_dim, device=self.device)
+
+        # Normalize class names if enabled (replace underscores with spaces)
+        if self.normalize_class_names:
+            class_names = [name.replace("_", " ") for name in class_names]
 
         # Generate all prompts for all classes
         all_prompts = []
@@ -799,6 +806,7 @@ class PretrainedModel(nn.Module):
                 "use_pretrained_logit_bias", False
             )
             learnable_logit_bias = classifier_config.get("learnable_logit_bias", False)
+            normalize_class_names = classifier_config.get("normalize_class_names", False)
 
             # Extract CLIP's pre-trained temperature if requested
             if use_pretrained_temperature and hasattr(clip_model, "logit_scale"):
@@ -847,6 +855,7 @@ class PretrainedModel(nn.Module):
                 logit_bias=logit_bias,
                 learnable_logit_bias=learnable_logit_bias,
                 learnable_hybrid_weight=learnable_hybrid_weight,
+                normalize_class_names=normalize_class_names,
                 device=self.device,
             )
 
