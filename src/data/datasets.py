@@ -899,6 +899,83 @@ class FGVCAircraftCL(ContinualDataset):
 
         self.setup()
 
+    def _build_variant_to_manufacturer_mapping(self):
+        """Build mapping from variant names to manufacturer names using annotation files."""
+        variant_to_manufacturer = {}
+        
+        # Read all annotation files to build complete mapping
+        data_dir = os.path.join(self.root, "fgvc-aircraft-2013b", "data")
+        splits = ["train", "val", "test", "trainval"]
+        
+        for split in splits:
+            variant_file = os.path.join(data_dir, f"images_variant_{split}.txt")
+            manufacturer_file = os.path.join(data_dir, f"images_manufacturer_{split}.txt")
+            
+            if not os.path.exists(variant_file) or not os.path.exists(manufacturer_file):
+                continue
+            
+            # Read variant annotations
+            with open(variant_file, 'r') as f:
+                variant_lines = f.readlines()
+            
+            # Read manufacturer annotations
+            with open(manufacturer_file, 'r') as f:
+                manufacturer_lines = f.readlines()
+            
+            # Build mapping
+            for variant_line, manufacturer_line in zip(variant_lines, manufacturer_lines):
+                variant_parts = variant_line.strip().split(' ', 1)
+                manufacturer_parts = manufacturer_line.strip().split(' ', 1)
+                
+                if len(variant_parts) == 2 and len(manufacturer_parts) == 2:
+                    variant = variant_parts[1]
+                    manufacturer = manufacturer_parts[1]
+                    
+                    # Only store if we don't have this variant yet
+                    if variant not in variant_to_manufacturer:
+                        variant_to_manufacturer[variant] = manufacturer
+        
+        return variant_to_manufacturer
+    
+    def _enhance_class_names_with_manufacturer(self):
+        """Enhance variant class names by adding manufacturer info where missing."""
+        if self.annotation_level != "variant":
+            # Only apply to variant annotation level
+            return
+        
+        # Build variant-to-manufacturer mapping
+        variant_to_manufacturer = self._build_variant_to_manufacturer_mapping()
+        
+        # Enhanced class names
+        enhanced_classes = []
+        
+        for variant in self.classes:
+            # Check if variant already contains manufacturer info
+            manufacturer = variant_to_manufacturer.get(variant, None)
+            
+            if manufacturer is None:
+                # No manufacturer found, keep original
+                enhanced_classes.append(variant)
+            else:
+                # Check if manufacturer name is already in the variant name
+                if manufacturer.lower() in variant.lower():
+                    # Already contains manufacturer, keep original
+                    enhanced_classes.append(variant)
+                else:
+                    # Add manufacturer prefix
+                    enhanced_name = f"{manufacturer} {variant}"
+                    enhanced_classes.append(enhanced_name)
+        
+        # Update classes and class_to_idx
+        self.classes = enhanced_classes
+        self.class_to_idx = {cls: idx for idx, cls in enumerate(self.classes)}
+        
+        # Also update the underlying datasets to keep consistency
+        self.dataset_train.classes = enhanced_classes
+        self.dataset_train.class_to_idx = self.class_to_idx
+        self.dataset_test.classes = enhanced_classes
+        self.dataset_test.class_to_idx = self.class_to_idx
+
     def setup(self):
         """Setup FGVC Aircraft dataset."""
         # Load the train and test datasets
@@ -923,6 +1000,9 @@ class FGVCAircraftCL(ContinualDataset):
         # Set classes and class_to_idx from the train dataset
         self.classes = self.dataset_train.classes
         self.class_to_idx = self.dataset_train.class_to_idx
+        
+        # Enhance class names with manufacturer info for variant level
+        self._enhance_class_names_with_manufacturer()
 
 
 class ImageNetCL(ContinualDataset):
