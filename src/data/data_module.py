@@ -13,7 +13,9 @@ from src.data.datasets import (
     DomainNetCL,
     FGVCAircraftCL,
     Food101CL,
+    ImageNet100CL,
     ImageNetACL,
+    ImageNetCL,
     ImageNetRCL,
     MergedTaskDataset,
     ObjectNet200CL,
@@ -278,6 +280,28 @@ class DataModule:
                 download=True,
                 seed=self.config["seed"],
                 annotation_level=self.dataset_config.get("annotation_level", "variant"),
+            )
+        elif dataset_name == "imagenet":
+            self.dataset = ImageNetCL(
+                root=self.data_dir,
+                num_steps=self.continual_config["num_steps"],
+                classes_per_step=self.continual_config["classes_per_step"],
+                transform=self.train_transform,
+                test_transform=self.test_transform,
+                target_transform=None,
+                download=False,
+                seed=self.config["seed"],
+            )
+        elif dataset_name == "imagenet100":
+            self.dataset = ImageNet100CL(
+                root=self.data_dir,
+                num_steps=self.continual_config["num_steps"],
+                classes_per_step=self.continual_config["classes_per_step"],
+                transform=self.train_transform,
+                test_transform=self.test_transform,
+                target_transform=None,
+                download=False,
+                seed=self.config["seed"],
             )
         elif dataset_name == "imagenet-r":
             self.dataset = ImageNetRCL(

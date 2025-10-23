@@ -925,6 +925,207 @@ class FGVCAircraftCL(ContinualDataset):
         self.class_to_idx = self.dataset_train.class_to_idx
 
 
+class ImageNetCL(ContinualDataset):
+    """ImageNet-1K dataset for continual learning."""
+
+    def __init__(
+        self,
+        root: str,
+        num_steps: int,
+        classes_per_step: int,
+        transform: Optional[Callable] = None,
+        test_transform: Optional[Callable] = None,
+        target_transform: Optional[Callable] = None,
+        download: bool = False,
+        seed: int = 42,
+        class_order: Optional[List[int]] = None,
+    ):
+        super().__init__(
+            root=root,
+            num_steps=num_steps,
+            classes_per_step=classes_per_step,
+            transform=transform,
+            test_transform=test_transform,
+            target_transform=target_transform,
+            download=download,
+            seed=seed,
+        )
+
+        # ImageNet has 1000 classes
+        self.num_classes = 1000
+
+        # Set class order (either provided or random)
+        if class_order is None:
+            self.class_order = list(range(self.num_classes))
+            np.random.shuffle(self.class_order)
+        else:
+            assert len(class_order) == self.num_classes, (
+                "Class order must contain all classes"
+            )
+            self.class_order = class_order
+
+        self.setup()
+
+    def setup(self):
+        """Setup ImageNet dataset."""
+        # Check if dataset exists
+        dataset_path = os.path.join(self.root, "imagenet")
+        if not os.path.exists(dataset_path):
+            raise ValueError(
+                "ImageNet dataset not found. "
+                "Please download ImageNet and place it at {}".format(dataset_path)
+            )
+
+        # Load the train and test datasets using torchvision's ImageNet
+        self.dataset_train = tv_datasets.ImageNet(
+            root=dataset_path,
+            split="train",
+            transform=self.transform,
+            target_transform=self.target_transform,
+        )
+
+        self.dataset_test = tv_datasets.ImageNet(
+            root=dataset_path,
+            split="val",
+            transform=self.test_transform,
+            target_transform=self.target_transform,
+        )
+
+        # Set classes and class_to_idx from the train dataset
+        # Note: ImageNet.classes is a list of tuples, we need to extract class names
+        self.classes = [cls[0] if isinstance(cls, tuple) else cls for cls in self.dataset_train.classes]
+        self.class_to_idx = {cls: idx for idx, cls in enumerate(self.classes)}
+
+
+class ImageNet100CL(ContinualDataset):
+    """ImageNet-100 subset for continual learning.
+    
+    Uses a predefined 100-class subset of ImageNet with split files.
+    """
+
+    def __init__(
+        self,
+        root: str,
+        num_steps: int,
+        classes_per_step: int,
+        transform: Optional[Callable] = None,
+        test_transform: Optional[Callable] = None,
+        target_transform: Optional[Callable] = None,
+        download: bool = False,
+        seed: int = 42,
+        class_order: Optional[List[int]] = None,
+    ):
+        super().__init__(
+            root=root,
+            num_steps=num_steps,
+            classes_per_step=classes_per_step,
+            transform=transform,
+            test_transform=test_transform,
+            target_transform=target_transform,
+            download=download,
+            seed=seed,
+        )
+
+        # ImageNet-100 has 100 classes
+        self.num_classes = 100
+
+        # Set class order (either provided or random)
+        if class_order is None:
+            self.class_order = list(range(self.num_classes))
+            np.random.shuffle(self.class_order)
+        else:
+            assert len(class_order) == self.num_classes, (
+                "Class order must contain all classes"
+            )
+            self.class_order = class_order
+
+        self.setup()
+
+    def setup(self):
+        """Setup ImageNet-100 dataset."""
+        # Check if dataset exists
+        imagenet_path = os.path.join(self.root, "imagenet")
+        split_path = os.path.join(self.root, "imagenet-100")
+        
+        if not os.path.exists(imagenet_path):
+            raise ValueError(
+                "ImageNet dataset not found. "
+                "Please download ImageNet and place it at {}".format(imagenet_path)
+            )
+        
+        if not os.path.exists(split_path):
+            raise ValueError(
+                "ImageNet-100 split files not found. "
+                "Please ensure split files are at {}".format(split_path)
+            )
+
+        # Read the split files to get image paths and labels
+        train_file = os.path.join(split_path, "train_100.txt")
+        val_file = os.path.join(split_path, "val_100.txt")
+
+        # Load train split
+        train_images = []
+        train_targets = []
+        with open(train_file, "r") as f:
+            for line in f:
+                img_path, label = line.strip().split()
+                full_path = os.path.join(imagenet_path, img_path)
+                train_images.append(full_path)
+                train_targets.append(int(label))
+
+        # Load val split
+        val_images = []
+        val_targets = []
+        with open(val_file, "r") as f:
+            for line in f:
+                img_path, label = line.strip().split()
+                full_path = os.path.join(imagenet_path, img_path)
+                val_images.append(full_path)
+                val_targets.append(int(label))
+
+        # Create custom datasets
+        self.dataset_train = ImageListDataset(
+            train_images, train_targets, transform=self.transform
+        )
+        self.dataset_test = ImageListDataset(
+            val_images, val_targets, transform=self.test_transform
+        )
+
+        # Extract class names from the synset directories
+        # Build mapping from label index to synset ID by iterating through images
+        idx_to_synset = {}
+        for img_path, label in zip(train_images, train_targets):
+            if label not in idx_to_synset:
+                # Extract synset ID from path (e.g., train/n01440764/...)
+                synset_id = img_path.split('/')[-2]
+                idx_to_synset[label] = synset_id
+                # Stop once we've found all unique classes
+                if len(idx_to_synset) == self.num_classes:
+                    break
+
+        # Verify we found all classes
+        assert len(idx_to_synset) == self.num_classes, (
+            f"Expected {self.num_classes} classes but found {len(idx_to_synset)}"
+        )
+
+        # Load ImageNet metadata to get human-readable class names
+        # Use torchvision's ImageNet metadata
+        imagenet_dataset = tv_datasets.ImageNet(root=imagenet_path, split="train")
+        # Create mapping from wnid to class name
+        wnid_to_class = {wnid: cls[0] if isinstance(cls, tuple) else cls 
+                       for wnid, cls in zip(imagenet_dataset.wnids, imagenet_dataset.classes)}
+        
+        # Map our 100 classes using the synset IDs
+        self.classes = [wnid_to_class[idx_to_synset[i]] for i in range(self.num_classes)]
+
+        self.class_to_idx = {cls: idx for idx, cls in enumerate(self.classes)}
+
+        print(
+            f"Loaded ImageNet-100 dataset with {len(train_images)} training images "
+            f"and {len(val_images)} validation images"
+        )
+
+
 class ImageNetRCL(ContinualDataset):
     """ImageNet-R dataset for continual learning."""
 
