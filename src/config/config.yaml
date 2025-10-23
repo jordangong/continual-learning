@@ -81,6 +81,31 @@ continual:
       normal_std: 0.02           # Standard deviation for normal initialization
       uniform_range: [-0.1, 0.1] # Range for uniform initialization [min, max]
 
+  # LoRA (Low-Rank Adaptation) parameters (used when strategy is "lora")
+  lora:
+    rank: 8                      # Rank of LoRA matrices (r in the paper)
+    alpha: 16                    # LoRA scaling factor (alpha / r is the final scaling)
+    dropout: 0.1                 # Dropout rate for LoRA layers
+    target_modules:              # List of module name patterns to apply LoRA to
+      # --- For timm ViT models (e.g., vit_base_patch16_224) ---
+      - "qkv"                    # Query, Key, Value projections in attention
+      - "proj"                   # Output projection in attention
+      - "fc1"                    # First linear layer in MLP
+      - "fc2"                    # Second linear layer in MLP
+      # --- For OpenCLIP/CLIP models (ResidualAttentionBlock) ---
+      # NOTE: Cannot adapt in_proj_weight in nn.MultiheadAttention (it's a Parameter, not a module)
+      # Use these instead:
+      # - "attn.out_proj"        # Attention output projection (NonDynamicallyQuantizableLinear)
+      # - "mlp.c_fc"             # MLP first layer
+      # - "mlp.c_proj"           # MLP second layer
+      # --- For other architectures ---
+      # - "attention.query"      # Separate Q projection
+      # - "attention.key"        # Separate K projection  
+      # - "attention.value"      # Separate V projection
+    merge_weights: false         # Merge LoRA weights into original weights after training
+    bias: "none"                 # Bias handling: "none", "all", or "lora_only"
+    fan_in_fan_out: false        # Set to true for Conv1D layers (e.g., GPT-2 style)
+
 # Training hyperparameters
 training:
   num_epochs: 100              # Maximum epochs per step

@@ -15,6 +15,7 @@ except ImportError:
     print("Warning: saev module not found. SAE functionality will not be available.")
 
 from .vit_prompt_tuning import create_vit_prompted_model
+from .lora import create_lora_model
 
 
 class CLIPTextEncoderWrapper(nn.Module):
@@ -1326,6 +1327,13 @@ def create_model(
             prompt_config=continual_config.get("prompt_tuning", {}),
             embed_dim=model.feature_dim,
             num_classes=num_classes,
+        )
+    
+    # Add LoRA if configured
+    elif continual_config.get("strategy", "") == "lora":
+        model = create_lora_model(
+            base_model=model,
+            lora_config=continual_config.get("lora", {}),
         )
 
     model = model.to(device_obj)
