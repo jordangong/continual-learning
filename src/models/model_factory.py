@@ -17,6 +17,7 @@ except ImportError:
 from .vit_prompt_tuning import create_vit_prompted_model
 from .lora import create_lora_model
 from .adapter import create_adapter_model
+from .projection import create_projection_model
 
 
 class CLIPTextEncoderWrapper(nn.Module):
@@ -121,6 +122,7 @@ class CLIPClassifier(nn.Module):
         learnable_hybrid_weight: bool = False,
         normalize_class_names: bool = False,
         device: Optional[torch.device] = None,
+        text_projection: Optional[nn.Module] = None,
     ):
         """
         Args:
@@ -158,6 +160,7 @@ class CLIPClassifier(nn.Module):
         self.normalize = normalize
         self.ensemble_text = ensemble_text
         self.normalize_class_names = normalize_class_names
+        self.text_projection = text_projection  # Optional projection for text features
         
         # Hybrid weight handling (for hybrid mode)
         if learnable_hybrid_weight:
@@ -289,6 +292,10 @@ class CLIPClassifier(nn.Module):
 
         # Extract text features in one forward pass
         all_text_features = self.text_encoder(text_tokens)
+        
+        # Apply text projection if available (for projection tuning)
+        if self.text_projection is not None:
+            all_text_features = self.text_projection(all_text_features)
 
         # Normalize if specified
         if self.normalize:
@@ -1381,6 +1388,15 @@ def create_model(
                 adapter_config=adapter_config,
                 model_source=model_config["source"],
             )
+    
+    # Add Projection if configured
+    elif continual_config.get("strategy", "") == "projection":
+        projection_config = continual_config.get("projection", {})
+        print("\nApplying projection tuning...")
+        model = create_projection_model(
+            model=model,
+            projection_config=projection_config,
+        )
 
     model = model.to(device_obj)
     return model

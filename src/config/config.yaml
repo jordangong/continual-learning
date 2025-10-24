@@ -119,6 +119,18 @@ continual:
     adapter_after_attn: false    # Insert adapter after attention (before MLP)
     adapter_after_mlp: true      # Insert adapter after MLP (standard placement)
 
+  # Projection tuning parameters (used when strategy is "projection")
+  projection:
+    projection_type: "linear"    # Type of projection: "linear", "mlp", "residual"
+    hidden_dim: null             # Hidden dimension for MLP projection (null = auto, same as input)
+    dropout: 0.1                 # Dropout rate for projection layers
+    activation: "gelu"           # Activation function for MLP: "gelu", "relu", "silu"
+    num_layers: 1                # Number of layers for MLP projection (1 = linear)
+    init_scale: 0.01             # Scale for weight initialization
+    # For CLIP models with separate vision and text encoders
+    adapt_vision: true           # Apply projection to vision encoder (backbone)
+    adapt_text: true             # Apply projection to text encoder
+
 # Training hyperparameters
 training:
   num_epochs: 100              # Maximum epochs per step
