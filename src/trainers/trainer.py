@@ -572,6 +572,10 @@ class ContinualTrainer:
         if hasattr(self.model, "reset_frequency_tracking"):
             self.model.reset_frequency_tracking()
             print(f"{debug_prefix}Reset frequency tracking for step {step + 1}")
+        
+        # Add new projection for expandable projection tuning
+        if step > 0:  # Skip for first step (already created during initialization)
+            self._add_expandable_projections_if_needed(step)
 
         # Set current task classes for logit masking and calibration
         if self.mask_logits or self.calibration_enabled:
@@ -1632,6 +1636,52 @@ class ContinualTrainer:
             aux_losses.update(model_to_use.get_auxiliary_losses())
 
         return aux_losses
+
+    def _add_expandable_projections_if_needed(self, step: int):
+        """
+        Add new projections to expandable projection modules for the current step.
+        
+        This is called at the beginning of each new continual learning step (except step 0).
+        It checks if the model uses expandable projections and adds new projection layers.
+        
+        Args:
+            step: Current continual learning step (>0)
+        """
+        from src.models.projection import ExpandableProjection
+        
+        # Get the correct model reference (module if distributed)
+        model_to_check = self.model.module if self.distributed else self.model
+        
+        projection_added = False
+        
+        # Check vision projection (in ProjectionWrapper)
+        if hasattr(model_to_check, "projection"):
+            if isinstance(model_to_check.projection, ExpandableProjection):
+                model_to_check.projection.add_projection()
+                model_to_check.projection.projections[-1].to(self.device)
+                projection_added = True
+        
+        # Check text projection (in CLIPClassifier)
+        if hasattr(model_to_check, "classifier"):
+            classifier = model_to_check.classifier
+            if hasattr(classifier, "text_projection"):
+                if isinstance(classifier.text_projection, ExpandableProjection):
+                    classifier.text_projection.add_projection()
+                    classifier.text_projection.projections[-1].to(self.device)
+                    projection_added = True
+        
+        if projection_added:
+            print(f"Added new projection(s) for step {step + 1}")
+            
+            # After adding new projections, we need to update the optimizer
+            # to include the new parameters
+            if not self.config["scheduler"].get("global_scheduler", False):
+                # For per-step scheduler, optimizer will be reset in train_step
+                pass
+            else:
+                # For global scheduler, we need to manually update optimizer
+                print("Note: Using global scheduler with expandable projections. "
+                      "Consider using per-step scheduler for better control.")
 
     def _initialize_ema_teacher(self):
         """

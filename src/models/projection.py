@@ -135,6 +135,240 @@ class ProjectionLayer(nn.Module):
             return self.projection(x)
 
 
+class ExpandableProjection(nn.Module):
+    """
+    Expandable projection for continual learning (inspired by PROOF).
+    
+    This module maintains multiple projections (one per continual learning step)
+    and fuses their outputs. Previous projections are frozen when learning new ones.
+    
+    Fusion methods:
+    - add: Simple addition (PROOF default)
+    - weighted_sum: Weighted sum with learnable/fixed weights
+    - attention: Attention-based fusion
+    - gated: Gated fusion with learnable gates
+    
+    Reference:
+    - Da-Wei Zhou et al., "Learning without Forgetting for Vision-Language Models"
+    """
+    
+    def __init__(
+        self,
+        input_dim: int,
+        output_dim: int,
+        projection_type: str = "linear",
+        hidden_dim: Optional[int] = None,
+        num_layers: int = 1,
+        dropout: float = 0.1,
+        activation: str = "gelu",
+        init_scale: float = 0.01,
+        fusion_method: str = "add",
+        learnable_fusion: bool = False,
+        freeze_previous: bool = True,
+    ):
+        """
+        Args:
+            input_dim: Input feature dimension
+            output_dim: Output feature dimension
+            projection_type: Type of projection ("linear", "mlp", "residual")
+            hidden_dim: Hidden dimension for MLP
+            num_layers: Number of layers for MLP
+            dropout: Dropout rate
+            activation: Activation function
+            init_scale: Weight initialization scale
+            fusion_method: How to fuse projection outputs ("add", "weighted_sum", "attention", "gated")
+            learnable_fusion: Whether fusion weights/gates are learnable
+            freeze_previous: Whether to freeze previous projections when adding new ones
+        """
+        super().__init__()
+        self.input_dim = input_dim
+        self.output_dim = output_dim
+        self.projection_type = projection_type
+        self.hidden_dim = hidden_dim
+        self.num_layers = num_layers
+        self.dropout = dropout
+        self.activation = activation
+        self.init_scale = init_scale
+        self.fusion_method = fusion_method
+        self.learnable_fusion = learnable_fusion
+        self.freeze_previous = freeze_previous
+        
+        # List to store projections (one per step)
+        self.projections = nn.ModuleList()
+        
+        # Fusion parameters will be initialized when adding projections
+        # (Don't initialize to None as it causes issues with register_buffer)
+        
+        # Add first projection
+        self.add_projection()
+    
+    def add_projection(self):
+        """Add a new projection for the current continual learning step."""
+        # Freeze all previous projections if requested
+        if self.freeze_previous:
+            for proj in self.projections:
+                for param in proj.parameters():
+                    param.requires_grad = False
+        
+        # Create new projection
+        new_projection = ProjectionLayer(
+            input_dim=self.input_dim,
+            output_dim=self.output_dim,
+            projection_type=self.projection_type,
+            hidden_dim=self.hidden_dim,
+            num_layers=self.num_layers,
+            dropout=self.dropout,
+            activation=self.activation,
+            init_scale=self.init_scale,
+        )
+        
+        self.projections.append(new_projection)
+        
+        # Update fusion parameters
+        self._update_fusion_parameters()
+        
+        print(f"Added projection #{len(self.projections)} (total: {len(self.projections)})")
+    
+    def _update_fusion_parameters(self):
+        """Update fusion parameters based on current number of projections."""
+        num_projections = len(self.projections)
+        
+        if self.fusion_method == "weighted_sum":
+            # Initialize/update weights for weighted sum
+            if self.learnable_fusion:
+                # Learnable weights (softmax normalized)
+                self.fusion_weights = nn.Parameter(
+                    torch.ones(num_projections) / num_projections
+                )
+            else:
+                # Fixed uniform weights
+                new_weights = torch.ones(num_projections) / num_projections
+                if hasattr(self, "fusion_weights"):
+                    # Update existing buffer by setting it directly
+                    self.fusion_weights = new_weights
+                else:
+                    # Register new buffer for first time
+                    self.register_buffer("fusion_weights", new_weights)
+        
+        elif self.fusion_method == "attention":
+            # Simple attention mechanism
+            if self.learnable_fusion:
+                self.attention = nn.Sequential(
+                    nn.Linear(self.output_dim, self.output_dim // 4),
+                    nn.ReLU(),
+                    nn.Linear(self.output_dim // 4, 1),
+                )
+            else:
+                # Non-learnable attention (just use mean)
+                self.attention = None
+        
+        elif self.fusion_method == "gated":
+            # Gated fusion (one gate per projection)
+            if self.learnable_fusion:
+                self.gates = nn.ModuleList([
+                    nn.Sequential(
+                        nn.Linear(self.output_dim, self.output_dim // 4),
+                        nn.ReLU(),
+                        nn.Linear(self.output_dim // 4, 1),
+                        nn.Sigmoid(),
+                    )
+                    for _ in range(num_projections)
+                ])
+            else:
+                # Fixed gates (all equal)
+                self.gates = None
+    
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Forward pass through all projections with fusion.
+        
+        Args:
+            x: Input features [batch_size, input_dim]
+        
+        Returns:
+            Fused projected features [batch_size, output_dim]
+        """
+        if len(self.projections) == 0:
+            raise RuntimeError("No projections available. Call add_projection() first.")
+        
+        # Get outputs from all projections
+        projection_outputs = []
+        for proj in self.projections:
+            output = proj(x)
+            projection_outputs.append(output)
+        
+        # Stack outputs [num_projections, batch_size, output_dim]
+        stacked_outputs = torch.stack(projection_outputs, dim=0)
+        
+        # Fuse according to selected method
+        if self.fusion_method == "add":
+            # Simple addition (PROOF default)
+            fused = stacked_outputs.sum(dim=0)
+        
+        elif self.fusion_method == "weighted_sum":
+            # Weighted sum with optional learnable weights
+            if self.learnable_fusion:
+                # Apply softmax to ensure weights sum to 1
+                weights = torch.softmax(self.fusion_weights, dim=0)
+            else:
+                weights = self.fusion_weights
+            
+            # weights: [num_projections], stacked_outputs: [num_projections, batch_size, output_dim]
+            # Reshape weights for broadcasting: [num_projections, 1, 1]
+            weights = weights.view(-1, 1, 1)
+            fused = (stacked_outputs * weights).sum(dim=0)
+        
+        elif self.fusion_method == "attention":
+            # Attention-based fusion
+            if self.learnable_fusion and self.attention is not None:
+                # Compute attention scores for each projection output
+                # stacked_outputs: [num_projections, batch_size, output_dim]
+                attention_scores = []
+                for i in range(len(self.projections)):
+                    score = self.attention(stacked_outputs[i])  # [batch_size, 1]
+                    attention_scores.append(score)
+                
+                # Stack and normalize scores
+                attention_scores = torch.stack(attention_scores, dim=0)  # [num_projections, batch_size, 1]
+                attention_weights = torch.softmax(attention_scores, dim=0)
+                
+                # Weighted sum with attention
+                fused = (stacked_outputs * attention_weights).sum(dim=0)
+            else:
+                # Non-learnable: just use mean
+                fused = stacked_outputs.mean(dim=0)
+        
+        elif self.fusion_method == "gated":
+            # Gated fusion
+            if self.learnable_fusion and self.gates is not None:
+                # Compute gates for each projection
+                gated_outputs = []
+                for i, gate in enumerate(self.gates):
+                    gate_value = gate(stacked_outputs[i])  # [batch_size, 1]
+                    gated_output = stacked_outputs[i] * gate_value
+                    gated_outputs.append(gated_output)
+                
+                fused = torch.stack(gated_outputs, dim=0).sum(dim=0)
+            else:
+                # Non-learnable: just use sum
+                fused = stacked_outputs.sum(dim=0)
+        
+        else:
+            raise ValueError(f"Unknown fusion method: {self.fusion_method}")
+        
+        return fused
+    
+    def num_projections(self) -> int:
+        """Return the number of projections."""
+        return len(self.projections)
+    
+    def get_active_projection(self) -> nn.Module:
+        """Get the most recent (active) projection."""
+        if len(self.projections) == 0:
+            raise RuntimeError("No projections available.")
+        return self.projections[-1]
+
+
 class ProjectionWrapper(nn.Module):
     """
     Wrapper that adds projection layer between backbone and classifier.
@@ -248,6 +482,10 @@ def create_projection_model(
     init_scale = projection_config.get("init_scale", 0.01)
     adapt_vision = projection_config.get("adapt_vision", True)
     adapt_text = projection_config.get("adapt_text", True)
+    expandable = projection_config.get("expandable", False)
+    fusion_method = projection_config.get("fusion_method", "add")
+    learnable_fusion = projection_config.get("learnable_fusion", False)
+    freeze_previous = projection_config.get("freeze_previous", True)
     
     # Get feature dimension from backbone
     if hasattr(model, "feature_dim"):
@@ -279,16 +517,32 @@ def create_projection_model(
         # Create vision projection if requested
         if adapt_vision:
             print("\nApplying projection to vision encoder (backbone)...")
-            vision_projection = ProjectionLayer(
-                input_dim=feature_dim,
-                output_dim=feature_dim,
-                projection_type=projection_type,
-                hidden_dim=hidden_dim,
-                num_layers=num_layers,
-                dropout=dropout,
-                activation=activation,
-                init_scale=init_scale,
-            )
+            if expandable:
+                vision_projection = ExpandableProjection(
+                    input_dim=feature_dim,
+                    output_dim=feature_dim,
+                    projection_type=projection_type,
+                    hidden_dim=hidden_dim,
+                    num_layers=num_layers,
+                    dropout=dropout,
+                    activation=activation,
+                    init_scale=init_scale,
+                    fusion_method=fusion_method,
+                    learnable_fusion=learnable_fusion,
+                    freeze_previous=freeze_previous,
+                )
+                print(f"  Expandable vision projection (fusion: {fusion_method})")
+            else:
+                vision_projection = ProjectionLayer(
+                    input_dim=feature_dim,
+                    output_dim=feature_dim,
+                    projection_type=projection_type,
+                    hidden_dim=hidden_dim,
+                    num_layers=num_layers,
+                    dropout=dropout,
+                    activation=activation,
+                    init_scale=init_scale,
+                )
             vision_params = sum(p.numel() for p in vision_projection.parameters())
             total_params += vision_params
             print(f"  Vision projection parameters: {vision_params:,}")
@@ -296,16 +550,32 @@ def create_projection_model(
         # Create text projection if requested
         if adapt_text:
             print("\nApplying projection to text encoder...")
-            text_projection = ProjectionLayer(
-                input_dim=feature_dim,
-                output_dim=feature_dim,
-                projection_type=projection_type,
-                hidden_dim=hidden_dim,
-                num_layers=num_layers,
-                dropout=dropout,
-                activation=activation,
-                init_scale=init_scale,
-            )
+            if expandable:
+                text_projection = ExpandableProjection(
+                    input_dim=feature_dim,
+                    output_dim=feature_dim,
+                    projection_type=projection_type,
+                    hidden_dim=hidden_dim,
+                    num_layers=num_layers,
+                    dropout=dropout,
+                    activation=activation,
+                    init_scale=init_scale,
+                    fusion_method=fusion_method,
+                    learnable_fusion=learnable_fusion,
+                    freeze_previous=freeze_previous,
+                )
+                print(f"  Expandable text projection (fusion: {fusion_method})")
+            else:
+                text_projection = ProjectionLayer(
+                    input_dim=feature_dim,
+                    output_dim=feature_dim,
+                    projection_type=projection_type,
+                    hidden_dim=hidden_dim,
+                    num_layers=num_layers,
+                    dropout=dropout,
+                    activation=activation,
+                    init_scale=init_scale,
+                )
             text_params = sum(p.numel() for p in text_projection.parameters())
             total_params += text_params
             print(f"  Text projection parameters: {text_params:,}")
@@ -346,16 +616,31 @@ def create_projection_model(
     
     else:
         # Standard single-encoder model
-        projection = ProjectionLayer(
-            input_dim=feature_dim,
-            output_dim=feature_dim,
-            projection_type=projection_type,
-            hidden_dim=hidden_dim,
-            num_layers=num_layers,
-            dropout=dropout,
-            activation=activation,
-            init_scale=init_scale,
-        )
+        if expandable:
+            projection = ExpandableProjection(
+                input_dim=feature_dim,
+                output_dim=feature_dim,
+                projection_type=projection_type,
+                hidden_dim=hidden_dim,
+                num_layers=num_layers,
+                dropout=dropout,
+                activation=activation,
+                init_scale=init_scale,
+                fusion_method=fusion_method,
+                learnable_fusion=learnable_fusion,
+                freeze_previous=freeze_previous,
+            )
+        else:
+            projection = ProjectionLayer(
+                input_dim=feature_dim,
+                output_dim=feature_dim,
+                projection_type=projection_type,
+                hidden_dim=hidden_dim,
+                num_layers=num_layers,
+                dropout=dropout,
+                activation=activation,
+                init_scale=init_scale,
+            )
         
         # Print projection info
         num_params = sum(p.numel() for p in projection.parameters())
@@ -363,6 +648,8 @@ def create_projection_model(
         print("Projection Configuration:")
         print(f"  Type: {projection_type}")
         print(f"  Feature dim: {feature_dim}")
+        if expandable:
+            print(f"  Expandable: True (fusion: {fusion_method})")
         if projection_type == "mlp":
             print(f"  Hidden dim: {hidden_dim or feature_dim}")
             print(f"  Num layers: {num_layers}")
