@@ -106,6 +106,19 @@ continual:
     bias: "none"                 # Bias handling: "none", "all", or "lora_only"
     fan_in_fan_out: false        # Set to true for Conv1D layers (e.g., GPT-2 style)
 
+  # Adapter tuning parameters (used when strategy is "adapter")
+  adapter:
+    bottleneck_dim: 64           # Dimension of adapter bottleneck (lower = more efficient)
+    dropout: 0.1                 # Dropout rate for adapter layers
+    init_scale: 1e-3             # Scale for adapter weight initialization
+    activation: "gelu"           # Activation function: "gelu", "relu", "silu"
+    # For CLIP models with separate vision and text encoders
+    adapt_vision: true           # Apply adapters to vision encoder
+    adapt_text: true             # Apply adapters to text encoder
+    # Adapter placement (after which components)
+    adapter_after_attn: false    # Insert adapter after attention (before MLP)
+    adapter_after_mlp: true      # Insert adapter after MLP (standard placement)
+
 # Training hyperparameters
 training:
   num_epochs: 100              # Maximum epochs per step

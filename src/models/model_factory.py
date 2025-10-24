@@ -16,6 +16,7 @@ except ImportError:
 
 from .vit_prompt_tuning import create_vit_prompted_model
 from .lora import create_lora_model
+from .adapter import create_adapter_model
 
 
 class CLIPTextEncoderWrapper(nn.Module):
@@ -1335,6 +1336,51 @@ def create_model(
             base_model=model,
             lora_config=continual_config.get("lora", {}),
         )
+    
+    # Add Adapter if configured
+    elif continual_config.get("strategy", "") == "adapter":
+        adapter_config = continual_config.get("adapter", {})
+        
+        # Check if this is a CLIP model with text encoder (CLIPClassifier)
+        has_clip_text_encoder = (
+            model_config["source"] == "openclip" and 
+            hasattr(model, "classifier") and
+            hasattr(model.classifier, "text_encoder") and
+            isinstance(model.classifier.text_encoder, CLIPTextEncoderWrapper)
+        )
+        
+        if has_clip_text_encoder:
+            # CLIP dual-encoder model: visual encoder in backbone, text encoder in classifier
+            print("\nDetected CLIP dual-encoder model")
+            
+            # Apply adapters to vision encoder (backbone) if configured
+            if adapter_config.get("adapt_vision", True):
+                print("Applying adapters to vision encoder (backbone)...")
+                model.backbone = create_adapter_model(
+                    base_model=model.backbone,
+                    adapter_config=adapter_config,
+                    model_source="openclip",
+                )
+            
+            # Apply adapters to text encoder if configured
+            if adapter_config.get("adapt_text", True):
+                print("Applying adapters to text encoder (transformer)...")
+                # Text encoder is wrapped in CLIPTextEncoderWrapper
+                # The actual transformer is at clip_model.transformer
+                model.classifier.text_encoder.clip_model.transformer = create_adapter_model(
+                    base_model=model.classifier.text_encoder.clip_model.transformer,
+                    adapter_config=adapter_config,
+                    model_source="openclip",
+                )
+        else:
+            # Standard single-encoder model (timm ViT, OpenCLIP visual only, etc.)
+            # All models have backbone+classifier structure, adapt the backbone
+            print("Applying adapters to backbone...")
+            model.backbone = create_adapter_model(
+                base_model=model.backbone,
+                adapter_config=adapter_config,
+                model_source=model_config["source"],
+            )
 
     model = model.to(device_obj)
     return model
