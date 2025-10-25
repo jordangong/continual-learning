@@ -1533,11 +1533,23 @@ class ContinualTrainer:
             inputs, targets
         )
 
-        # Get temperature/logit_scale from model
+        # Get pretraining temperature from model (separate from regular temperature)
+        # This allows PROOF-style setups: learnable pretraining temp + temperature=1.0 for regular loss
         temperature = 1.0
         if hasattr(model_to_use, "classifier"):
             classifier = model_to_use.classifier
-            if hasattr(classifier, "use_log_temperature") and classifier.use_log_temperature:
+            # Use separate pretraining temperature if available
+            if hasattr(classifier, "use_log_pretraining_temperature") and classifier.use_log_pretraining_temperature:
+                if hasattr(classifier, "log_pretraining_temperature"):
+                    temperature = torch.exp(classifier.log_pretraining_temperature)
+            elif hasattr(classifier, "pretraining_temperature"):
+                temp_param = classifier.pretraining_temperature
+                if isinstance(temp_param, torch.Tensor):
+                    temperature = temp_param
+                else:
+                    temperature = torch.tensor(temp_param, device=self.device)
+            # Fallback to regular temperature if pretraining temperature not configured
+            elif hasattr(classifier, "use_log_temperature") and classifier.use_log_temperature:
                 if hasattr(classifier, "log_temperature"):
                     temperature = torch.exp(classifier.log_temperature)
             elif hasattr(classifier, "temperature"):
@@ -1647,7 +1659,7 @@ class ContinualTrainer:
         Args:
             step: Current continual learning step (>0)
         """
-        from src.models.projection import ExpandableProjection
+        from src.models.projection import ExpandableProjection, ProofFusionLayer
         
         # Get the correct model reference (module if distributed)
         model_to_check = self.model.module if self.distributed else self.model
@@ -1668,6 +1680,13 @@ class ContinualTrainer:
                 if isinstance(classifier.text_projection, ExpandableProjection):
                     classifier.text_projection.add_projection()
                     classifier.text_projection.projections[-1].to(self.device)
+                    projection_added = True
+            
+            # Check PROOF fusion layer (add new context prompts)
+            if hasattr(classifier, "proof_fusion"):
+                if isinstance(classifier.proof_fusion, ProofFusionLayer):
+                    classifier.proof_fusion.add_context_prompts()
+                    classifier.proof_fusion.context_prompts[-1].data = classifier.proof_fusion.context_prompts[-1].data.to(self.device)
                     projection_added = True
         
         if projection_added:

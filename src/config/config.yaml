@@ -135,6 +135,9 @@ continual:
     fusion_method: "add"         # Fusion method: "add", "weighted_sum", "attention", "gated"
     learnable_fusion: false      # Whether fusion weights/gates are learnable
     freeze_previous: true        # Freeze previous projections when learning new ones
+    # PROOF fusion layer (combines image/text features with prototypes and context prompts)
+    use_proof_fusion: false      # Enable PROOF-style self-attention fusion layer
+    num_context_prompts: 4       # Number of learnable context prompts per task
 
 # Training hyperparameters
 training:

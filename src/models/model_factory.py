@@ -117,12 +117,16 @@ class CLIPClassifier(nn.Module):
         dropout: float = 0.0,
         learnable_temperature: bool = False,
         use_log_temperature: bool = False,
+        pretraining_temperature: float = 1.0,
+        learnable_pretraining_temperature: bool = False,
+        use_log_pretraining_temperature: bool = False,
         logit_bias: Optional[float] = None,
         learnable_logit_bias: bool = False,
         learnable_hybrid_weight: bool = False,
         normalize_class_names: bool = False,
         device: Optional[torch.device] = None,
         text_projection: Optional[nn.Module] = None,
+        vision_projection: Optional[nn.Module] = None,
     ):
         """
         Args:
@@ -161,6 +165,7 @@ class CLIPClassifier(nn.Module):
         self.ensemble_text = ensemble_text
         self.normalize_class_names = normalize_class_names
         self.text_projection = text_projection  # Optional projection for text features
+        self.vision_projection = vision_projection  # Optional projection for vision features
         
         # Hybrid weight handling (for hybrid mode)
         if learnable_hybrid_weight:
@@ -181,6 +186,20 @@ class CLIPClassifier(nn.Module):
                 self.temperature = nn.Parameter(torch.tensor(temperature))
         else:
             self.temperature = temperature
+
+        # Pretraining temperature handling (separate from regular temperature)
+        # This allows decoupling pretraining loss temperature from regular loss temperature
+        # PROOF uses learnable pretraining temperature while regular loss uses temperature=1.0
+        self.use_log_pretraining_temperature = use_log_pretraining_temperature
+        if learnable_pretraining_temperature:
+            if use_log_pretraining_temperature:
+                self.log_pretraining_temperature = nn.Parameter(
+                    torch.log(torch.tensor(pretraining_temperature))
+                )
+            else:
+                self.pretraining_temperature = nn.Parameter(torch.tensor(pretraining_temperature))
+        else:
+            self.pretraining_temperature = pretraining_temperature
 
         # Logit bias handling (extracted from CLIP model during initialization)
         if logit_bias is not None:
@@ -379,6 +398,10 @@ class CLIPClassifier(nn.Module):
             if self.normalize:
                 x = F.normalize(x, p=2, dim=1)
 
+            # NOTE: PROOF fusion is NOT supported in text mode
+            # Text mode may not have learned_classifier/prototypes, making fusion meaningless
+            # Use hybrid mode with hybrid_weight=1.0 for text-only predictions with PROOF fusion
+
             # Compute cosine similarity scaled by temperature (CLIP-style: multiply by logit_scale.exp())
             logits = torch.matmul(x, text_embeddings.t())
             logits = logits * temperature
@@ -405,6 +428,48 @@ class CLIPClassifier(nn.Module):
             else:
                 x_norm = x
 
+            # Apply PROOF fusion if enabled
+            # PROOF requires hybrid mode with prototypical classifier for meaningful prototypes
+            fused_prototypes = None
+            if hasattr(self, "proof_fusion") and self.proof_fusion is not None:
+                # Get image prototypes from learned classifier
+                if not hasattr(self.learned_classifier, "prototypes"):
+                    raise ValueError(
+                        "PROOF fusion requires hybrid mode with prototypical classifier. "
+                        "The learned_classifier must have 'prototypes' attribute. "
+                        "Set classifier.mode='hybrid' and classifier.learned_classifier_type='prototypical'."
+                    )
+                
+                # CRITICAL: Only use prototypes and text embeddings for SEEN classes (prototype_counts > 0)
+                # In continual learning, we haven't seen all classes yet
+                # Note: Prototypes are always initialized before training, so seen_classes_mask will never be empty
+                seen_classes_mask = self.learned_classifier.prototype_counts > 0
+                
+                # Get only seen class prototypes and text embeddings
+                image_prototypes = self.learned_classifier.prototypes.data.clone()
+                image_prototypes_seen = image_prototypes[seen_classes_mask]
+                text_embeddings_seen = text_embeddings[seen_classes_mask]
+                
+                # IMPORTANT: Apply vision projection to prototypes if available
+                # Prototypes are stored as raw backbone outputs, but need to be projected
+                # to match the space of the image features x
+                if self.vision_projection is not None:
+                    image_prototypes_seen = self.vision_projection(image_prototypes_seen)
+                
+                # Normalize prototypes if specified
+                if self.normalize:
+                    image_prototypes_seen = F.normalize(image_prototypes_seen, p=2, dim=1)
+                
+                # Apply fusion to get fused features and fused prototypes
+                # Fused prototypes will be used for prototype loss computation
+                x, text_embeddings_seen, fused_prototypes_seen = self.proof_fusion(x_norm, text_embeddings_seen, image_prototypes_seen)
+                x_norm = x  # PROOF does not normalize features after fusion
+
+                # Fill seen class prototypes and text embeddings
+                text_embeddings[seen_classes_mask] = text_embeddings_seen.to(text_embeddings.dtype)  # Fix autocast issue
+                fused_prototypes = torch.zeros_like(image_prototypes)
+                fused_prototypes[seen_classes_mask] = fused_prototypes_seen.to(fused_prototypes.dtype)
+                
             # Text-based logits
             text_logits = torch.matmul(x_norm, text_embeddings.t()) * temperature
 
@@ -413,8 +478,12 @@ class CLIPClassifier(nn.Module):
                 text_logits = text_logits + self.logit_bias
 
             # Learned logits (with temperature scaling)
-            learned_logits = self.learned_classifier(x) * temperature
-
+            # If PROOF fusion enabled, this uses fused prototypes (prototype loss)
+            if hasattr(self, "proof_fusion") and self.proof_fusion is not None and fused_prototypes is not None:
+                learned_logits = torch.matmul(x, fused_prototypes.t()) * temperature
+            else:
+                learned_logits = self.learned_classifier(x) * temperature
+            
             # Weighted combination
             logits = (
                 self.hybrid_weight * text_logits
@@ -738,6 +807,11 @@ class PretrainedModel(nn.Module):
         normalize = classifier_config.get("normalize", False)
         learnable_temperature = classifier_config.get("learnable_temperature", False)
         use_log_temperature = classifier_config.get("use_log_temperature", False)
+        
+        # Pretraining temperature (separate from regular temperature for decoupling)
+        pretraining_temperature = classifier_config.get("pretraining_temperature", 1.0)
+        learnable_pretraining_temperature = classifier_config.get("learnable_pretraining_temperature", False)
+        use_log_pretraining_temperature = classifier_config.get("use_log_pretraining_temperature", False)
 
         # CLIP text encoder configuration
         self.use_text_encoder = (
@@ -829,6 +903,21 @@ class PretrainedModel(nn.Module):
             elif temperature is not None:
                 print(f"Using manually configured temperature: {temperature:.2f}")
 
+            # Extract CLIP's pre-trained temperature for pretraining loss if requested
+            use_pretrained_pretraining_temperature = classifier_config.get(
+                "use_pretrained_pretraining_temperature", True
+            )
+            if use_pretrained_pretraining_temperature and hasattr(clip_model, "logit_scale"):
+                # CLIP stores temperature as log(scale), we need exp(logit_scale)
+                pretraining_temperature = clip_model.logit_scale.exp().item()
+                print(f"Using CLIP pre-trained pretraining temperature: {pretraining_temperature:.2f}")
+            elif use_pretrained_pretraining_temperature:
+                print(
+                    f"Warning: use_pretrained_pretraining_temperature=True but model has no logit_scale. Using pretraining_temperature={pretraining_temperature}"
+                )
+            elif pretraining_temperature is not None:
+                print(f"Using manually configured pretraining temperature: {pretraining_temperature:.2f}")
+
             # Extract CLIP's logit_bias if requested (CustomTextCLIP support)
             if use_pretrained_logit_bias:
                 if (
@@ -861,6 +950,9 @@ class PretrainedModel(nn.Module):
                 dropout=dropout,
                 learnable_temperature=learnable_temperature,
                 use_log_temperature=use_log_temperature,
+                pretraining_temperature=pretraining_temperature,
+                learnable_pretraining_temperature=learnable_pretraining_temperature,
+                use_log_pretraining_temperature=use_log_pretraining_temperature,
                 logit_bias=logit_bias,
                 learnable_logit_bias=learnable_logit_bias,
                 learnable_hybrid_weight=learnable_hybrid_weight,
@@ -904,8 +996,10 @@ class PretrainedModel(nn.Module):
 
         # Freeze classifier if specified
         if self.freeze_classifier:
-            for param in self.classifier.parameters():
-                param.requires_grad = False
+            for name, param in self.classifier.named_parameters():
+                # In case of learnable temperature and logit bias, we don't freeze it
+                if "temperature" not in name or "logit_bias" not in name:
+                    param.requires_grad = False
 
     def _load_backbone(self):
         """Load backbone model based on configuration.

@@ -369,6 +369,154 @@ class ExpandableProjection(nn.Module):
         return self.projections[-1]
 
 
+class ProofFusionLayer(nn.Module):
+    """
+    PROOF Fusion Layer for continual learning with vision-language models.
+    
+    This layer implements the fusion mechanism from PROOF (PROjectiOn Fusion):
+    - Fuses image features, text features, image prototypes, and context prompts
+    - Uses single-head self-attention for fusion
+    - Context prompts are expandable (one set per task, previous frozen)
+    
+    Reference:
+    - Da-Wei Zhou et al., "Learning without Forgetting for Vision-Language Models"
+    """
+    
+    def __init__(
+        self,
+        feature_dim: int,
+        num_context_prompts: int = 4,
+        freeze_previous: bool = True,
+    ):
+        """
+        Args:
+            feature_dim: Feature dimension
+            num_context_prompts: Number of learnable context prompts per task
+            freeze_previous: Whether to freeze previous context prompts when adding new ones
+        """
+        super().__init__()
+        self.feature_dim = feature_dim
+        self.num_context_prompts = num_context_prompts
+        self.freeze_previous = freeze_previous
+        
+        # Context prompts for each task (expandable like projections)
+        self.context_prompts = nn.ParameterList()
+        
+        # Single-head self-attention (as in PROOF paper)
+        self.q_proj = nn.Linear(feature_dim, feature_dim, bias=False)
+        self.k_proj = nn.Linear(feature_dim, feature_dim, bias=False)
+        self.v_proj = nn.Linear(feature_dim, feature_dim, bias=False)
+        self.out_proj = nn.Linear(feature_dim, feature_dim, bias=False)
+        
+        # Initialize attention weights
+        nn.init.xavier_uniform_(self.q_proj.weight)
+        nn.init.xavier_uniform_(self.k_proj.weight)
+        nn.init.xavier_uniform_(self.v_proj.weight)
+        nn.init.xavier_uniform_(self.out_proj.weight)
+        
+        # Add first set of context prompts
+        self.add_context_prompts()
+    
+    def add_context_prompts(self):
+        """Add new context prompts for a new continual learning task."""
+        # Freeze all previous context prompts if requested
+        if self.freeze_previous:
+            for prompt in self.context_prompts:
+                prompt.requires_grad = False
+        
+        # Create new prompts for the current task
+        new_prompts = nn.Parameter(
+            torch.randn(self.num_context_prompts, self.feature_dim) * 0.02
+        )
+        self.context_prompts.append(new_prompts)
+        
+        print(f"Added context prompts #{len(self.context_prompts)} (total: {len(self.context_prompts)})")
+    
+    def forward(
+        self,
+        image_features: torch.Tensor,
+        text_features: torch.Tensor,
+        image_prototypes: torch.Tensor,
+    ) -> tuple:
+        """
+        Fusion forward pass using self-attention.
+        
+        Following PROOF paper implementation:
+        - Expand text, prototypes, prompts to batch size
+        - Apply self-attention on batch
+        - Average expanded outputs to get fused text features and prototypes
+        
+        Args:
+            image_features: Image features from current batch [batch_size, feature_dim]
+            text_features: Text features for all classes [num_classes, feature_dim]
+            image_prototypes: Image prototypes for seen classes [num_seen_classes, feature_dim]
+        
+        Returns:
+            fused_image_features: Fused image features [batch_size, feature_dim]
+            fused_text_features: Fused text features [num_classes, feature_dim]
+            fused_prototypes: Fused prototypes [num_seen_classes, feature_dim]
+        """
+        batch_size = image_features.shape[0]
+        num_classes = text_features.shape[0]
+        
+        # Collect all context prompts from all tasks (flatten)
+        all_context_prompts = torch.cat([p for p in self.context_prompts], dim=0)  # [num_context, D]
+        
+        # Expand text features, prototypes, and prompts to batch size
+        # This follows the original PROOF implementation
+        text_features_expanded = text_features.unsqueeze(0).expand(batch_size, -1, -1)  # [B, num_classes, D]
+        prototypes_expanded = image_prototypes.unsqueeze(0).expand(batch_size, -1, -1)  # [B, num_prototypes, D]
+        prompts_expanded = all_context_prompts.unsqueeze(0).expand(batch_size, -1, -1)  # [B, num_context, D]
+        
+        # Concatenate along sequence dimension
+        # Shape: [B, 1 + num_classes + num_prototypes + num_context, D]
+        all_tokens = torch.cat([
+            image_features.unsqueeze(1),   # [B, 1, D]
+            text_features_expanded,        # [B, num_classes, D]
+            prototypes_expanded,           # [B, num_prototypes, D]
+            prompts_expanded,              # [B, num_context, D]
+        ], dim=1)
+        
+        # Apply self-attention (single-head as in PROOF)
+        # Reshape for attention: [B*N, D] where N = sequence length
+        B, N, D = all_tokens.shape
+        tokens_flat = all_tokens.view(B * N, D)
+        
+        Q = self.q_proj(tokens_flat).view(B, N, D)  # [B, N, D]
+        K = self.k_proj(tokens_flat).view(B, N, D)  # [B, N, D]
+        V = self.v_proj(tokens_flat).view(B, N, D)  # [B, N, D]
+        
+        # Compute attention scores
+        attn_scores = torch.matmul(Q, K.transpose(-2, -1)) / (self.feature_dim ** 0.5)  # [B, N, N]
+        attn_weights = torch.softmax(attn_scores, dim=-1)
+        
+        # Apply attention to values
+        attn_output = torch.matmul(attn_weights, V)  # [B, N, D]
+        
+        # Output projection
+        output_flat = attn_output.view(B * N, D)
+        output = self.out_proj(output_flat).view(B, N, D)  # [B, N, D]
+        
+        # Extract fused features
+        # Image features: first token for each batch item
+        fused_image_features = output[:, 0, :]  # [B, D]
+        
+        # Text features: average over batch dimension for text tokens
+        # Indices: 1 to 1+num_classes
+        fused_text_features = output[:, 1:1+num_classes, :].mean(dim=0)  # [num_classes, D]
+        
+        # Prototype features: average over batch dimension for prototype tokens
+        # Indices: 1+num_classes to 1+num_classes+num_prototypes
+        num_prototypes = image_prototypes.shape[0]
+        fused_prototypes = output[:, 1+num_classes:1+num_classes+num_prototypes, :].mean(dim=0)  # [num_prototypes, D]
+        
+        return fused_image_features, fused_text_features, fused_prototypes
+    
+    def num_context_prompts_total(self) -> int:
+        """Return the total number of context prompts across all tasks."""
+        return len(self.context_prompts) * self.num_context_prompts
+
+
 class ProjectionWrapper(nn.Module):
     """
     Wrapper that adds projection layer between backbone and classifier.
@@ -385,6 +533,7 @@ class ProjectionWrapper(nn.Module):
         classifier: nn.Module,
         projection: ProjectionLayer,
         freeze_backbone: bool = True,
+        original_model: Optional[nn.Module] = None,
     ):
         """
         Args:
@@ -392,11 +541,13 @@ class ProjectionWrapper(nn.Module):
             classifier: Classifier head
             projection: Projection layer to insert
             freeze_backbone: Whether to freeze backbone parameters
+            original_model: Optional reference to original model (for attribute forwarding)
         """
         super().__init__()
         self.backbone = backbone
         self.projection = projection
         self.classifier = classifier
+        self._original_model = original_model  # Store with _ prefix to avoid conflicts
         
         # Freeze backbone if requested
         if freeze_backbone:
@@ -441,6 +592,38 @@ class ProjectionWrapper(nn.Module):
     def get_projection_parameters(self):
         """Get projection parameters for optimization."""
         return list(self.projection.parameters())
+    
+    def forward_for_pretraining_loss(
+        self, x: torch.Tensor, targets: torch.Tensor
+    ):
+        """
+        Forward pass for pretraining loss computation with projection.
+        
+        This method ensures the projection layer is applied to image features
+        before they are used in the pretraining loss computation.
+        
+        Args:
+            x: Input images [batch_size, C, H, W]
+            targets: Target class labels [batch_size]
+            
+        Returns:
+            Tuple of (normalized_image_features, normalized_text_features)
+        """
+        # Extract image features from backbone
+        image_features = self.backbone(x)
+        
+        # Apply projection to image features
+        projected_features = self.projection(image_features)
+        
+        # Pass projected features to classifier's forward_for_pretraining_loss
+        return self.classifier.forward_for_pretraining_loss(projected_features, targets)
+    
+    def __getattr__(self, name: str):
+        """Forward attribute access to base module for compatibility."""
+        try:
+            return super().__getattr__(name)
+        except AttributeError:
+            return getattr(self._original_model, name)
 
 
 def create_projection_model(
@@ -486,6 +669,8 @@ def create_projection_model(
     fusion_method = projection_config.get("fusion_method", "add")
     learnable_fusion = projection_config.get("learnable_fusion", False)
     freeze_previous = projection_config.get("freeze_previous", True)
+    use_proof_fusion = projection_config.get("use_proof_fusion", False)
+    num_context_prompts = projection_config.get("num_context_prompts", 4)
     
     # Get feature dimension from backbone
     if hasattr(model, "feature_dim"):
@@ -583,8 +768,48 @@ def create_projection_model(
             # Add text projection to classifier
             model.classifier.text_projection = text_projection
         
+        # Create PROOF fusion layer if requested
+        fusion_layer = None
+        if use_proof_fusion:
+            print("\nApplying PROOF fusion layer...")
+            
+            # Validate PROOF fusion requirements
+            if not hasattr(model.classifier, "mode") or model.classifier.mode != "hybrid":
+                raise ValueError(
+                    "PROOF fusion requires classifier.mode='hybrid'. "
+                    "PROOF needs real prototypes from a prototypical classifier, "
+                    "which are only available in hybrid mode. "
+                    "Set classifier.mode='hybrid' and use hybrid_weight=1.0 for text-only predictions."
+                )
+            
+            if not hasattr(model.classifier, "learned_classifier") or model.classifier.learned_classifier is None:
+                raise ValueError(
+                    "PROOF fusion requires a learned_classifier in hybrid mode. "
+                    "The learned_classifier should be a prototypical classifier with 'prototypes' attribute."
+                )
+            
+            fusion_layer = ProofFusionLayer(
+                feature_dim=feature_dim,
+                num_context_prompts=num_context_prompts,
+                freeze_previous=freeze_previous,
+            )
+            fusion_params = sum(p.numel() for p in fusion_layer.parameters())
+            total_params += fusion_params
+            print(f"  PROOF fusion parameters: {fusion_params:,}")
+            print(f"  Context prompts per task: {num_context_prompts}")
+            print("  ⚠️  PROOF requires hybrid mode with prototypical classifier")
+            print("  ⚠️  Set hybrid_weight=1.0 for text-only predictions")
+            
+            # Add fusion layer to classifier
+            model.classifier.proof_fusion = fusion_layer
+        
         print(f"\nTotal projection parameters: {total_params:,}")
         print("="*60 + "\n")
+        
+        # Add vision projection to classifier (for PROOF fusion to use)
+        # This must be done before wrapping so the classifier can project prototypes
+        if adapt_vision and vision_projection is not None:
+            model.classifier.vision_projection = vision_projection
         
         # Wrap with vision projection if requested
         if adapt_vision:
@@ -593,21 +818,8 @@ def create_projection_model(
                 classifier=model.classifier,
                 projection=vision_projection,
                 freeze_backbone=True,
+                original_model=model,
             )
-            
-            # Copy over attributes
-            if hasattr(model, "feature_dim"):
-                wrapped_model.feature_dim = model.feature_dim
-            if hasattr(model, "use_text_encoder"):
-                wrapped_model.use_text_encoder = model.use_text_encoder
-            if hasattr(model, "device"):
-                wrapped_model.device = model.device
-            
-            # Copy methods
-            if hasattr(model, "set_class_names"):
-                wrapped_model.set_class_names = model.set_class_names
-            if hasattr(model, "forward_for_pretraining_loss"):
-                wrapped_model.forward_for_pretraining_loss = model.forward_for_pretraining_loss
             
             return wrapped_model
         else:
@@ -659,26 +871,13 @@ def create_projection_model(
         print(f"\nProjection Parameters: {num_params:,}")
         print("="*60 + "\n")
         
-        # Wrap model with projection
+        # Wrap model with projection, passing original model for attribute forwarding
         wrapped_model = ProjectionWrapper(
             backbone=model.backbone,
             classifier=model.classifier,
             projection=projection,
             freeze_backbone=True,
+            original_model=model,
         )
-        
-        # Copy over other attributes from original model
-        if hasattr(model, "feature_dim"):
-            wrapped_model.feature_dim = model.feature_dim
-        if hasattr(model, "use_text_encoder"):
-            wrapped_model.use_text_encoder = model.use_text_encoder
-        if hasattr(model, "device"):
-            wrapped_model.device = model.device
-        
-        # Copy methods that might be needed
-        if hasattr(model, "set_class_names"):
-            wrapped_model.set_class_names = model.set_class_names
-        if hasattr(model, "forward_for_pretraining_loss"):
-            wrapped_model.forward_for_pretraining_loss = model.forward_for_pretraining_loss
         
         return wrapped_model

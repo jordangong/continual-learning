@@ -27,10 +27,20 @@ classifier:
 
   # Similarity settings
   normalize: true  # L2 normalize features (required for cosine similarity)
+  
+  # Regular loss temperature (for classification)
   temperature: 100.0  # CLIP temperature (only used if use_pretrained_temperature=false)
   use_pretrained_temperature: true  # Use CLIP's pre-trained logit_scale as temperature (recommended)
   learnable_temperature: false  # Make temperature a learnable parameter
   use_log_temperature: false  # If learnable_temperature=true, parameterize in log space
+  
+  # Pretraining loss temperature (for contrastive learning, decoupled from regular loss)
+  # PROOF uses learnable pretraining temperature while regular loss uses temperature=1.0 (no scaling)
+  pretraining_temperature: 100.0  # Pretraining temperature (only used if use_pretrained_pretraining_temperature=false)
+  use_pretrained_pretraining_temperature: true  # Use CLIP's pre-trained logit_scale for pretraining loss
+  learnable_pretraining_temperature: false  # Make pretraining temperature a learnable parameter
+  use_log_pretraining_temperature: false  # If learnable_pretraining_temperature=true, parameterize in log space
+  
   logit_bias: null  # Manual logit_bias value (only used if use_pretrained_logit_bias=false)
   use_pretrained_logit_bias: false  # Use CLIP's pre-trained logit_bias (only for CustomTextCLIP models)
   learnable_logit_bias: false  # Make logit_bias a learnable parameter
