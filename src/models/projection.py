@@ -11,6 +11,7 @@ Reference:
 - Similar to "feature transformation" or "feature adapter" approaches
 """
 
+import math
 import torch
 import torch.nn as nn
 from typing import Optional, Dict, Any
@@ -387,12 +388,14 @@ class ProofFusionLayer(nn.Module):
         feature_dim: int,
         num_context_prompts: int = 4,
         freeze_previous: bool = True,
+        dropout: float = 0.1,
     ):
         """
         Args:
             feature_dim: Feature dimension
             num_context_prompts: Number of learnable context prompts per task
             freeze_previous: Whether to freeze previous context prompts when adding new ones
+            dropout: Dropout rate for attention (default: 0.1 as in PROOF)
         """
         super().__init__()
         self.feature_dim = feature_dim
@@ -402,17 +405,25 @@ class ProofFusionLayer(nn.Module):
         # Context prompts for each task (expandable like projections)
         self.context_prompts = nn.ParameterList()
         
-        # Single-head self-attention (as in PROOF paper)
+        # Single-head self-attention (as in PROOF paper: n_head=1, d_k=d_v=feature_dim)
         self.q_proj = nn.Linear(feature_dim, feature_dim, bias=False)
         self.k_proj = nn.Linear(feature_dim, feature_dim, bias=False)
         self.v_proj = nn.Linear(feature_dim, feature_dim, bias=False)
         self.out_proj = nn.Linear(feature_dim, feature_dim, bias=False)
         
-        # Initialize attention weights
-        nn.init.xavier_uniform_(self.q_proj.weight)
-        nn.init.xavier_uniform_(self.k_proj.weight)
-        nn.init.xavier_uniform_(self.v_proj.weight)
-        nn.init.xavier_uniform_(self.out_proj.weight)
+        # Initialize attention weights following PROOF paper
+        # Q, K, V: normal init with std=sqrt(2/(d_model+d_k))
+        std = math.sqrt(2.0 / (feature_dim + feature_dim))
+        nn.init.normal_(self.q_proj.weight, mean=0, std=std)
+        nn.init.normal_(self.k_proj.weight, mean=0, std=std)
+        nn.init.normal_(self.v_proj.weight, mean=0, std=std)
+        # Output: xavier init
+        nn.init.xavier_normal_(self.out_proj.weight)
+        
+        # Attention components following PROOF
+        self.attn_dropout = nn.Dropout(dropout)
+        self.output_dropout = nn.Dropout(dropout)
+        self.layer_norm = nn.LayerNorm(feature_dim)
         
         # Add first set of context prompts
         self.add_context_prompts()
@@ -477,25 +488,28 @@ class ProofFusionLayer(nn.Module):
             prompts_expanded,              # [B, num_context, D]
         ], dim=1)
         
-        # Apply self-attention (single-head as in PROOF)
-        # Reshape for attention: [B*N, D] where N = sequence length
-        B, N, D = all_tokens.shape
-        tokens_flat = all_tokens.view(B * N, D)
+        # Apply self-attention following PROOF implementation
+        residual = all_tokens  # Save for residual connection
         
-        Q = self.q_proj(tokens_flat).view(B, N, D)  # [B, N, D]
-        K = self.k_proj(tokens_flat).view(B, N, D)  # [B, N, D]
-        V = self.v_proj(tokens_flat).view(B, N, D)  # [B, N, D]
+        # Project to Q, K, V
+        Q = self.q_proj(all_tokens)  # [B, N, D]
+        K = self.k_proj(all_tokens)  # [B, N, D]
+        V = self.v_proj(all_tokens)  # [B, N, D]
         
         # Compute attention scores
         attn_scores = torch.matmul(Q, K.transpose(-2, -1)) / (self.feature_dim ** 0.5)  # [B, N, N]
         attn_weights = torch.softmax(attn_scores, dim=-1)
+        attn_weights = self.attn_dropout(attn_weights)  # Dropout on attention weights
         
         # Apply attention to values
         attn_output = torch.matmul(attn_weights, V)  # [B, N, D]
         
-        # Output projection
-        output_flat = attn_output.view(B * N, D)
-        output = self.out_proj(output_flat).view(B, N, D)  # [B, N, D]
+        # Output projection with dropout
+        output = self.out_proj(attn_output)  # [B, N, D]
+        output = self.output_dropout(output)
+        
+        # Residual connection + LayerNorm
+        output = self.layer_norm(output + residual)  # [B, N, D]
         
         # Extract fused features
         # Image features: first token for each batch item
@@ -792,6 +806,7 @@ def create_projection_model(
                 feature_dim=feature_dim,
                 num_context_prompts=num_context_prompts,
                 freeze_previous=freeze_previous,
+                dropout=dropout,
             )
             fusion_params = sum(p.numel() for p in fusion_layer.parameters())
             total_params += fusion_params

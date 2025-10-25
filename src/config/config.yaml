@@ -123,7 +123,7 @@ continual:
   projection:
     projection_type: "linear"    # Type of projection: "linear", "mlp", "residual"
     hidden_dim: null             # Hidden dimension for MLP projection (null = auto, same as input)
-    dropout: 0.1                 # Dropout rate for projection layers
+    dropout: 0.1                 # Dropout rate for projection layers and PROOF fusion (default: 0.1)
     activation: "gelu"           # Activation function for MLP: "gelu", "relu", "silu"
     num_layers: 1                # Number of layers for MLP projection (1 = linear)
     init_scale: 0.01             # Scale for weight initialization
