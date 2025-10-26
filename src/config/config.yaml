@@ -36,6 +36,7 @@ distributed:
 continual:
   num_steps: 10                # Number of continual learning steps
   classes_per_step: 10         # Number of classes per step
+  first_step_classes: null     # Number of classes in first step (null = use classes_per_step)
   memory_size: 2000            # Size of memory buffer for rehearsal (if used)
   strategy: "finetune"         # Options: finetune, ewc, replay, zeroshot, prompt_tuning, ema etc.
   mask_logits: true            # Enable logit masking for non-current task classes, except replay samples

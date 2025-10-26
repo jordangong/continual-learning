@@ -29,6 +29,7 @@ class ContinualDataset:
         root: str,
         num_steps: int,
         classes_per_step: int,
+        first_step_classes: Optional[int] = None,
         transform: Optional[Callable] = None,
         test_transform: Optional[Callable] = None,
         target_transform: Optional[Callable] = None,
@@ -40,6 +41,7 @@ class ContinualDataset:
             root: Root directory for dataset
             num_steps: Number of continual learning steps
             classes_per_step: Number of classes per step
+            first_step_classes: Number of classes in first step (None = use classes_per_step)
             transform: Transform to apply to training data
             test_transform: Transform to apply to test data (if None, uses transform)
             target_transform: Transform to apply to targets
@@ -49,6 +51,7 @@ class ContinualDataset:
         self.root = root
         self.num_steps = num_steps
         self.classes_per_step = classes_per_step
+        self.first_step_classes = first_step_classes if first_step_classes is not None else classes_per_step
         self.transform = transform
         self.test_transform = (
             test_transform if test_transform is not None else transform
@@ -193,8 +196,14 @@ class ContinualDataset:
 
     def _get_step_classes(self, step: int) -> List[int]:
         """Get classes for a specific step."""
-        start_idx = step * self.classes_per_step
-        end_idx = min((step + 1) * self.classes_per_step, self.num_classes)
+        if step == 0:
+            # Use first_step_classes for the first step
+            start_idx = 0
+            end_idx = min(self.first_step_classes, self.num_classes)
+        else:
+            # For subsequent steps, calculate offset based on first step
+            start_idx = self.first_step_classes + (step - 1) * self.classes_per_step
+            end_idx = min(start_idx + self.classes_per_step, self.num_classes)
         return self.class_order[start_idx:end_idx]
 
     def _initialize_class_indices_cache(
@@ -418,6 +427,7 @@ class CIFAR100CL(ContinualDataset):
         root: str,
         num_steps: int,
         classes_per_step: int,
+        first_step_classes: Optional[int] = None,
         transform: Optional[Callable] = None,
         test_transform: Optional[Callable] = None,
         target_transform: Optional[Callable] = None,
@@ -429,6 +439,7 @@ class CIFAR100CL(ContinualDataset):
             root=root,
             num_steps=num_steps,
             classes_per_step=classes_per_step,
+            first_step_classes=first_step_classes,
             transform=transform,
             test_transform=test_transform,
             target_transform=target_transform,
@@ -481,6 +492,7 @@ class CUB200CL(ContinualDataset):
         root: str,
         num_steps: int,
         classes_per_step: int,
+        first_step_classes: Optional[int] = None,
         transform: Optional[Callable] = None,
         test_transform: Optional[Callable] = None,
         target_transform: Optional[Callable] = None,
@@ -492,6 +504,7 @@ class CUB200CL(ContinualDataset):
             root=root,
             num_steps=num_steps,
             classes_per_step=classes_per_step,
+            first_step_classes=first_step_classes,
             transform=transform,
             test_transform=test_transform,
             target_transform=target_transform,
@@ -610,6 +623,7 @@ class Caltech256CL(ContinualDataset):
         root: str,
         num_steps: int,
         classes_per_step: int,
+        first_step_classes: Optional[int] = None,
         transform: Optional[Callable] = None,
         test_transform: Optional[Callable] = None,
         target_transform: Optional[Callable] = None,
@@ -622,6 +636,7 @@ class Caltech256CL(ContinualDataset):
             root=root,
             num_steps=num_steps,
             classes_per_step=classes_per_step,
+            first_step_classes=first_step_classes,
             transform=transform,
             test_transform=test_transform,
             target_transform=target_transform,
@@ -699,6 +714,7 @@ class StanfordCarsCL(ContinualDataset):
         root: str,
         num_steps: int,
         classes_per_step: int,
+        first_step_classes: Optional[int] = None,
         transform: Optional[Callable] = None,
         test_transform: Optional[Callable] = None,
         target_transform: Optional[Callable] = None,
@@ -710,6 +726,7 @@ class StanfordCarsCL(ContinualDataset):
             root=root,
             num_steps=num_steps,
             classes_per_step=classes_per_step,
+            first_step_classes=first_step_classes,
             transform=transform,
             test_transform=test_transform,
             target_transform=target_transform,
@@ -764,6 +781,7 @@ class Food101CL(ContinualDataset):
         root: str,
         num_steps: int,
         classes_per_step: int,
+        first_step_classes: Optional[int] = None,
         transform: Optional[Callable] = None,
         test_transform: Optional[Callable] = None,
         target_transform: Optional[Callable] = None,
@@ -775,6 +793,7 @@ class Food101CL(ContinualDataset):
             root=root,
             num_steps=num_steps,
             classes_per_step=classes_per_step,
+            first_step_classes=first_step_classes,
             transform=transform,
             test_transform=test_transform,
             target_transform=target_transform,
@@ -829,6 +848,7 @@ class OxfordIIITPetCL(ContinualDataset):
         root: str,
         num_steps: int,
         classes_per_step: int,
+        first_step_classes: Optional[int] = None,
         transform: Optional[Callable] = None,
         test_transform: Optional[Callable] = None,
         target_transform: Optional[Callable] = None,
@@ -840,6 +860,7 @@ class OxfordIIITPetCL(ContinualDataset):
             root=root,
             num_steps=num_steps,
             classes_per_step=classes_per_step,
+            first_step_classes=first_step_classes,
             transform=transform,
             test_transform=test_transform,
             target_transform=target_transform,
@@ -894,6 +915,7 @@ class FGVCAircraftCL(ContinualDataset):
         root: str,
         num_steps: int,
         classes_per_step: int,
+        first_step_classes: Optional[int] = None,
         transform: Optional[Callable] = None,
         test_transform: Optional[Callable] = None,
         target_transform: Optional[Callable] = None,
@@ -906,6 +928,7 @@ class FGVCAircraftCL(ContinualDataset):
             root=root,
             num_steps=num_steps,
             classes_per_step=classes_per_step,
+            first_step_classes=first_step_classes,
             transform=transform,
             test_transform=test_transform,
             target_transform=target_transform,
@@ -1049,6 +1072,7 @@ class ImageNetCL(ContinualDataset):
         root: str,
         num_steps: int,
         classes_per_step: int,
+        first_step_classes: Optional[int] = None,
         transform: Optional[Callable] = None,
         test_transform: Optional[Callable] = None,
         target_transform: Optional[Callable] = None,
@@ -1060,6 +1084,7 @@ class ImageNetCL(ContinualDataset):
             root=root,
             num_steps=num_steps,
             classes_per_step=classes_per_step,
+            first_step_classes=first_step_classes,
             transform=transform,
             test_transform=test_transform,
             target_transform=target_transform,
@@ -1124,6 +1149,7 @@ class ImageNet100CL(ContinualDataset):
         root: str,
         num_steps: int,
         classes_per_step: int,
+        first_step_classes: Optional[int] = None,
         transform: Optional[Callable] = None,
         test_transform: Optional[Callable] = None,
         target_transform: Optional[Callable] = None,
@@ -1135,6 +1161,7 @@ class ImageNet100CL(ContinualDataset):
             root=root,
             num_steps=num_steps,
             classes_per_step=classes_per_step,
+            first_step_classes=first_step_classes,
             transform=transform,
             test_transform=test_transform,
             target_transform=target_transform,
@@ -1250,6 +1277,7 @@ class ImageNetRCL(ContinualDataset):
         root: str,
         num_steps: int,
         classes_per_step: int,
+        first_step_classes: Optional[int] = None,
         transform: Optional[Callable] = None,
         test_transform: Optional[Callable] = None,
         target_transform: Optional[Callable] = None,
@@ -1262,6 +1290,7 @@ class ImageNetRCL(ContinualDataset):
             root=root,
             num_steps=num_steps,
             classes_per_step=classes_per_step,
+            first_step_classes=first_step_classes,
             transform=transform,
             test_transform=test_transform,
             target_transform=target_transform,
@@ -1347,6 +1376,7 @@ class ImageNetACL(ContinualDataset):
         root: str,
         num_steps: int,
         classes_per_step: int,
+        first_step_classes: Optional[int] = None,
         transform: Optional[Callable] = None,
         test_transform: Optional[Callable] = None,
         target_transform: Optional[Callable] = None,
@@ -1359,6 +1389,7 @@ class ImageNetACL(ContinualDataset):
             root=root,
             num_steps=num_steps,
             classes_per_step=classes_per_step,
+            first_step_classes=first_step_classes,
             transform=transform,
             test_transform=test_transform,
             target_transform=target_transform,
@@ -1460,6 +1491,7 @@ class DomainNetCL(ContinualDataset):
         root: str,
         num_steps: int,
         classes_per_step: int,
+        first_step_classes: Optional[int] = None,
         transform: Optional[Callable] = None,
         test_transform: Optional[Callable] = None,
         target_transform: Optional[Callable] = None,
@@ -1488,6 +1520,7 @@ class DomainNetCL(ContinualDataset):
             root=root,
             num_steps=num_steps,
             classes_per_step=classes_per_step,
+            first_step_classes=first_step_classes,
             transform=transform,
             test_transform=test_transform,
             target_transform=target_transform,
@@ -1696,6 +1729,7 @@ class ObjectNetCL(ContinualDataset):
         root: str,
         num_steps: int,
         classes_per_step: int,
+        first_step_classes: Optional[int] = None,
         transform: Optional[Callable] = None,
         test_transform: Optional[Callable] = None,
         target_transform: Optional[Callable] = None,
@@ -1708,6 +1742,7 @@ class ObjectNetCL(ContinualDataset):
             root=root,
             num_steps=num_steps,
             classes_per_step=classes_per_step,
+            first_step_classes=first_step_classes,
             transform=transform,
             test_transform=test_transform,
             target_transform=target_transform,
@@ -1806,6 +1841,7 @@ class ObjectNet200CL(ContinualDataset):
         root: str,
         num_steps: int,
         classes_per_step: int,
+        first_step_classes: Optional[int] = None,
         transform: Optional[Callable] = None,
         test_transform: Optional[Callable] = None,
         target_transform: Optional[Callable] = None,
@@ -1817,6 +1853,7 @@ class ObjectNet200CL(ContinualDataset):
             root=root,
             num_steps=num_steps,
             classes_per_step=classes_per_step,
+            first_step_classes=first_step_classes,
             transform=transform,
             test_transform=test_transform,
             target_transform=target_transform,
@@ -1929,6 +1966,7 @@ class OmniBenchCL(ContinualDataset):
         root: str,
         num_steps: int,
         classes_per_step: int,
+        first_step_classes: Optional[int] = None,
         transform: Optional[Callable] = None,
         test_transform: Optional[Callable] = None,
         target_transform: Optional[Callable] = None,
@@ -1942,6 +1980,7 @@ class OmniBenchCL(ContinualDataset):
             root=root,
             num_steps=num_steps,
             classes_per_step=classes_per_step,
+            first_step_classes=first_step_classes,
             transform=transform,
             test_transform=test_transform,
             target_transform=target_transform,
@@ -2248,6 +2287,7 @@ class OmniBench300CL(ContinualDataset):
         root: str,
         num_steps: int,
         classes_per_step: int,
+        first_step_classes: Optional[int] = None,
         transform: Optional[Callable] = None,
         test_transform: Optional[Callable] = None,
         target_transform: Optional[Callable] = None,
@@ -2259,6 +2299,7 @@ class OmniBench300CL(ContinualDataset):
             root=root,
             num_steps=num_steps,
             classes_per_step=classes_per_step,
+            first_step_classes=first_step_classes,
             transform=transform,
             test_transform=test_transform,
             target_transform=target_transform,
@@ -2451,6 +2492,7 @@ class VTABCL(ContinualDataset):
         root: str,
         num_steps: int,
         classes_per_step: int,
+        first_step_classes: Optional[int] = None,
         transform: Optional[Callable] = None,
         test_transform: Optional[Callable] = None,
         target_transform: Optional[Callable] = None,
@@ -2463,6 +2505,7 @@ class VTABCL(ContinualDataset):
             root=root,
             num_steps=num_steps,
             classes_per_step=classes_per_step,
+            first_step_classes=first_step_classes,
             transform=transform,
             test_transform=test_transform,
             target_transform=target_transform,
@@ -2850,6 +2893,7 @@ class MergedTaskDataset(ContinualDataset):
         task_subsets: Dict[
             str, int
         ],  # Dict mapping task names to number of classes to use
+        first_step_classes: Optional[int] = None,
         transform: Optional[Callable] = None,
         test_transform: Optional[Callable] = None,
         target_transform: Optional[Callable] = None,
@@ -2861,6 +2905,7 @@ class MergedTaskDataset(ContinualDataset):
             root=root,
             num_steps=num_steps,
             classes_per_step=classes_per_step,
+            first_step_classes=first_step_classes,
             transform=transform,
             test_transform=test_transform,
             target_transform=target_transform,
