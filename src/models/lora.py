@@ -10,10 +10,82 @@ neural network architectures including Vision Transformers, ResNets, and CLIP mo
 """
 
 import math
-from typing import Any, Dict, List, Set
+from typing import Any, Dict, List
 
 import torch
 import torch.nn as nn
+
+
+class LoRAParameter(nn.Module):
+    """
+    LoRA adaptation for nn.Parameter objects (e.g., weights in nn.MultiheadAttention).
+    
+    This wraps a frozen Parameter with low-rank adaptation:
+        output = frozen_param @ input + (lora_B @ lora_A) @ input * scaling
+    """
+    
+    def __init__(
+        self,
+        base_param: nn.Parameter,
+        rank: int = 8,
+        alpha: float = 16.0,
+        dropout: float = 0.0,
+    ):
+        """
+        Args:
+            base_param: Original parameter to adapt [out_features, in_features]
+            rank: Rank of LoRA decomposition
+            alpha: LoRA scaling factor
+            dropout: Dropout probability
+        """
+        super().__init__()
+        
+        out_features, in_features = base_param.shape
+        self.out_features = out_features
+        self.in_features = in_features
+        self.rank = rank
+        self.alpha = alpha
+        self.scaling = alpha / rank
+        self.dropout_prob = dropout
+        
+        # Register frozen base parameter
+        self.register_buffer('base_param', base_param.data.clone())
+        
+        # LoRA matrices
+        self.lora_A = nn.Parameter(torch.zeros(rank, in_features))
+        self.lora_B = nn.Parameter(torch.zeros(out_features, rank))
+        
+        # Dropout
+        if dropout > 0.0:
+            self.dropout = nn.Dropout(p=dropout)
+        else:
+            self.dropout = nn.Identity()
+        
+        # Initialize
+        self.reset_parameters()
+    
+    def reset_parameters(self):
+        """Initialize LoRA parameters."""
+        nn.init.kaiming_uniform_(self.lora_A, a=math.sqrt(5))
+        nn.init.zeros_(self.lora_B)
+    
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Apply LoRA-adapted parameter to input.
+        
+        Args:
+            x: Input tensor [..., in_features]
+        
+        Returns:
+            Output tensor [..., out_features]
+        """
+        # Base transformation
+        output = torch.nn.functional.linear(x, self.base_param, None)
+        
+        # LoRA contribution
+        lora_out = self.dropout(x) @ self.lora_A.t() @ self.lora_B.t() * self.scaling
+        
+        return output + lora_out
 
 
 class LoRALayer(nn.Module):
@@ -269,6 +341,264 @@ class LoRALinear(nn.Module):
         self.lora.merged = False
 
 
+class LoRAMultiheadAttention(nn.Module):
+    """
+    Wrapper for nn.MultiheadAttention with LoRA adaptation on Q, K, V projections.
+    
+    This splits the fused in_proj_weight into separate Q, K, V projections and wraps
+    them with LoRAParameter. The forward pass manually applies the LoRA-adapted
+    projections before calling the attention mechanism.
+    """
+    
+    def __init__(
+        self,
+        base_attn: nn.MultiheadAttention,
+        rank: int = 8,
+        alpha: float = 16.0,
+        dropout: float = 0.0,
+        adapt_q: bool = True,
+        adapt_k: bool = True,
+        adapt_v: bool = True,
+        adapt_out: bool = True,
+    ):
+        """
+        Args:
+            base_attn: Base nn.MultiheadAttention module
+            rank: Rank of LoRA decomposition
+            alpha: LoRA scaling factor
+            dropout: Dropout probability
+            adapt_q: Whether to adapt Query projection
+            adapt_k: Whether to adapt Key projection
+            adapt_v: Whether to adapt Value projection
+            adapt_out: Whether to adapt output projection
+        """
+        super().__init__()
+        
+        self.base_attn = base_attn
+        self.embed_dim = base_attn.embed_dim
+        self.num_heads = base_attn.num_heads
+        self.head_dim = base_attn.head_dim
+        self.adapt_q = adapt_q
+        self.adapt_k = adapt_k
+        self.adapt_v = adapt_v
+        self.adapt_out = adapt_out
+        
+        # Check if this is a fused QKV attention
+        if not hasattr(base_attn, 'in_proj_weight') or base_attn.in_proj_weight is None:
+            raise ValueError("Base attention must have fused in_proj_weight")
+        
+        # Split the fused in_proj_weight
+        in_proj_weight = base_attn.in_proj_weight.data
+        assert in_proj_weight.shape[0] == 3 * self.embed_dim
+        
+        q_weight = in_proj_weight[:self.embed_dim, :]
+        k_weight = in_proj_weight[self.embed_dim:2*self.embed_dim, :]
+        v_weight = in_proj_weight[2*self.embed_dim:, :]
+        
+        # Split bias if present
+        if base_attn.in_proj_bias is not None:
+            in_proj_bias = base_attn.in_proj_bias.data
+            q_bias = in_proj_bias[:self.embed_dim]
+            k_bias = in_proj_bias[self.embed_dim:2*self.embed_dim]
+            v_bias = in_proj_bias[2*self.embed_dim:]
+        else:
+            q_bias = k_bias = v_bias = None
+        
+        # Create LoRAParameter or frozen parameters for Q, K, V
+        if adapt_q:
+            self.q_proj = LoRAParameter(nn.Parameter(q_weight.clone()), rank, alpha, dropout)
+        else:
+            self.register_buffer('q_weight', q_weight.clone())
+        
+        if adapt_k:
+            self.k_proj = LoRAParameter(nn.Parameter(k_weight.clone()), rank, alpha, dropout)
+        else:
+            self.register_buffer('k_weight', k_weight.clone())
+        
+        if adapt_v:
+            self.v_proj = LoRAParameter(nn.Parameter(v_weight.clone()), rank, alpha, dropout)
+        else:
+            self.register_buffer('v_weight', v_weight.clone())
+        
+        # Register biases as buffers (frozen)
+        if q_bias is not None:
+            self.register_buffer('q_bias', q_bias.clone())
+            self.register_buffer('k_bias', k_bias.clone())
+            self.register_buffer('v_bias', v_bias.clone())
+        else:
+            self.q_bias = self.k_bias = self.v_bias = None
+        
+        # Wrap out_proj with LoRALinear if adapt_out is True
+        if adapt_out and isinstance(base_attn.out_proj, nn.Linear):
+            self.out_proj = LoRALinear(
+                base_layer=base_attn.out_proj,
+                rank=rank,
+                alpha=alpha,
+                dropout=dropout,
+                bias="none",
+            )
+        else:
+            self.out_proj = base_attn.out_proj
+        
+        # Copy other attributes from base attention
+        self.batch_first = base_attn.batch_first
+        self.dropout = base_attn.dropout
+        self.add_zero_attn = base_attn.add_zero_attn
+        self.bias_k = base_attn.bias_k
+        self.bias_v = base_attn.bias_v
+    
+    def forward(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        key_padding_mask: torch.Tensor = None,
+        need_weights: bool = True,
+        attn_mask: torch.Tensor = None,
+        average_attn_weights: bool = True,
+        is_causal: bool = False,
+    ):
+        """Forward pass with LoRA-adapted QKV projections."""
+        # Apply Q, K, V projections (with or without LoRA)
+        if self.adapt_q:
+            q = self.q_proj(query)
+            if self.q_bias is not None:
+                q = q + self.q_bias
+        else:
+            q = torch.nn.functional.linear(query, self.q_weight, self.q_bias)
+        
+        if self.adapt_k:
+            k = self.k_proj(key)
+            if self.k_bias is not None:
+                k = k + self.k_bias
+        else:
+            k = torch.nn.functional.linear(key, self.k_weight, self.k_bias)
+        
+        if self.adapt_v:
+            v = self.v_proj(value)
+            if self.v_bias is not None:
+                v = v + self.v_bias
+        else:
+            v = torch.nn.functional.linear(value, self.v_weight, self.v_bias)
+        
+        # Reshape for multi-head attention
+        if self.batch_first:
+            # Input: [batch, seq_len, embed_dim]
+            batch_size, seq_len, _ = query.shape
+            q = q.view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
+            k = k.view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
+            v = v.view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
+        else:
+            # Input: [seq_len, batch, embed_dim]
+            seq_len, batch_size, _ = query.shape
+            q = q.view(seq_len, batch_size, self.num_heads, self.head_dim).transpose(0, 1).transpose(1, 2)
+            k = k.view(seq_len, batch_size, self.num_heads, self.head_dim).transpose(0, 1).transpose(1, 2)
+            v = v.view(seq_len, batch_size, self.num_heads, self.head_dim).transpose(0, 1).transpose(1, 2)
+        
+        # Compute attention scores
+        # q, k, v: [batch, num_heads, seq_len, head_dim]
+        scale = 1.0 / math.sqrt(self.head_dim)
+        attn_scores = torch.matmul(q, k.transpose(-2, -1)) * scale  # [batch, num_heads, seq_len, seq_len]
+        
+        # Apply attention mask if provided
+        if attn_mask is not None:
+            attn_scores = attn_scores + attn_mask
+        
+        # Apply causal mask if requested
+        if is_causal:
+            causal_mask = torch.triu(torch.ones(seq_len, seq_len, device=q.device), diagonal=1).bool()
+            attn_scores = attn_scores.masked_fill(causal_mask, float('-inf'))
+        
+        # Softmax to get attention weights
+        attn_weights = torch.nn.functional.softmax(attn_scores, dim=-1)
+        
+        # Apply dropout if training
+        if self.training and self.dropout > 0:
+            attn_weights = torch.nn.functional.dropout(attn_weights, p=self.dropout)
+        
+        # Apply attention to values
+        attn_output = torch.matmul(attn_weights, v)  # [batch, num_heads, seq_len, head_dim]
+        
+        # Reshape back
+        if self.batch_first:
+            attn_output = attn_output.transpose(1, 2).contiguous().view(batch_size, seq_len, self.embed_dim)
+        else:
+            attn_output = attn_output.transpose(1, 2).transpose(0, 1).contiguous().view(seq_len, batch_size, self.embed_dim)
+        
+        # Apply output projection (with LoRA)
+        attn_output = self.out_proj(attn_output)
+        
+        if need_weights:
+            # Average attention weights over heads if requested
+            if average_attn_weights:
+                attn_weights = attn_weights.mean(dim=1)
+            return attn_output, attn_weights
+        else:
+            return attn_output, None
+
+
+def adapt_multihead_attention_with_lora(
+    attn_module: nn.MultiheadAttention,
+    rank: int = 8,
+    alpha: float = 16.0,
+    dropout: float = 0.0,
+    adapt_q: bool = True,
+    adapt_k: bool = True,
+    adapt_v: bool = True,
+    adapt_out: bool = True,
+) -> nn.Module:
+    """
+    Adapt nn.MultiheadAttention with LoRA by creating a wrapper module.
+    
+    For CLIP models where Q, K, V have the same dimensions, nn.MultiheadAttention 
+    uses a fused in_proj_weight parameter of shape [3*embed_dim, embed_dim].
+    This function:
+    1. Splits in_proj_weight into separate Q, K, V projections
+    2. Wraps selected projections with LoRAParameter for low-rank adaptation
+    3. Returns a LoRAMultiheadAttention wrapper that handles the forward pass
+    
+    Args:
+        attn_module: nn.MultiheadAttention module to adapt
+        rank: Rank of LoRA decomposition
+        alpha: LoRA scaling factor
+        dropout: Dropout probability
+        adapt_q: Whether to adapt Query projection
+        adapt_k: Whether to adapt Key projection
+        adapt_v: Whether to adapt Value projection
+        adapt_out: Whether to adapt output projection
+    
+    Returns:
+        LoRAMultiheadAttention wrapper module
+    
+    Note:
+        Returns a new module that wraps the original attention module.
+        Individual Q, K, V, and out_proj can be selectively adapted.
+    
+    Example:
+        # Adapt only Q and V (as in some LoRA papers)
+        lora_attn = adapt_multihead_attention_with_lora(
+            attn, adapt_q=True, adapt_k=False, adapt_v=True, adapt_out=True
+        )
+    """
+    # Check if this is a fused QKV attention
+    if not hasattr(attn_module, 'in_proj_weight') or attn_module.in_proj_weight is None:
+        # Already using separate projections - not supported yet
+        print("Warning: MultiheadAttention doesn't have fused in_proj_weight, returning original module")
+        return attn_module
+    
+    # Create and return wrapper
+    return LoRAMultiheadAttention(
+        base_attn=attn_module,
+        rank=rank,
+        alpha=alpha,
+        dropout=dropout,
+        adapt_q=adapt_q,
+        adapt_k=adapt_k,
+        adapt_v=adapt_v,
+        adapt_out=adapt_out,
+    )
+
+
 class LoRAModel(nn.Module):
     """
     Wrapper that applies LoRA to a pretrained model.
@@ -279,38 +609,43 @@ class LoRAModel(nn.Module):
     def __init__(
         self,
         base_model: nn.Module,
-        lora_config: Dict[str, Any],
+        lora_config: dict,
     ):
         """
         Args:
-            base_model: The base pretrained model to adapt
-            lora_config: LoRA configuration dictionary containing:
-                - rank: Rank of LoRA matrices
-                - alpha: LoRA scaling factor
+            base_model: Pretrained model to adapt
+            lora_config: LoRA configuration with keys:
+                - rank: LoRA rank
+                - alpha: LoRA alpha scaling
                 - dropout: Dropout probability
-                - target_modules: List of module name patterns to apply LoRA to
-                - merge_weights: Whether to merge weights after training
-                - bias: Bias handling mode
-                - fan_in_fan_out: Conv1D-style flag
+                - target_modules: List of module name patterns to apply LoRA
+                - merge_weights: Whether to merge LoRA weights
+                - bias: Bias handling ("none", "all", "lora_only")
+                - fan_in_fan_out: Whether to use fan_in_fan_out convention
+                - multihead_attention: Dict with adapt_q, adapt_k, adapt_v, adapt_out flags
         """
         super().__init__()
         
         self.base_model = base_model
-        self.lora_config = lora_config
-        
-        # Extract configuration
         self.rank = lora_config.get("rank", 8)
         self.alpha = lora_config.get("alpha", 16.0)
         self.dropout = lora_config.get("dropout", 0.0)
-        self.target_modules = lora_config.get("target_modules", ["qkv", "proj", "fc1", "fc2"])
+        self.target_modules = lora_config.get("target_modules", [])
         self.merge_weights = lora_config.get("merge_weights", False)
         self.bias = lora_config.get("bias", "none")
         self.fan_in_fan_out = lora_config.get("fan_in_fan_out", False)
         
-        # Track which modules have LoRA applied (initialize before _apply_lora)
-        self.lora_modules: Set[str] = set()
+        # MultiheadAttention specific flags
+        mha_config = lora_config.get("multihead_attention", {})
+        self.adapt_q = mha_config.get("adapt_q", True)
+        self.adapt_k = mha_config.get("adapt_k", True)
+        self.adapt_v = mha_config.get("adapt_v", True)
+        self.adapt_out = mha_config.get("adapt_out", True)
         
-        # Apply LoRA to target modules
+        # Track adapted modules
+        self.lora_modules = set()
+        
+        # Apply LoRA to matching modules
         self._apply_lora()
     
     def _should_apply_lora(self, name: str, module: nn.Module) -> bool:
@@ -325,27 +660,32 @@ class LoRAModel(nn.Module):
             True if LoRA should be applied
         
         Note:
-            Only applies to nn.Linear and its subclasses (e.g., NonDynamicallyQuantizableLinear).
-            Does NOT apply to nn.Parameter objects like in_proj_weight in nn.MultiheadAttention.
+            Applies to:
+            - nn.Linear and its subclasses (e.g., NonDynamicallyQuantizableLinear)
+            - nn.MultiheadAttention (QKV projections split and adapted)
         """
-        if not isinstance(module, nn.Linear):
-            return False
+        # Check for MultiheadAttention
+        if isinstance(module, nn.MultiheadAttention):
+            for pattern in self.target_modules:
+                if pattern in name:
+                    return True
         
-        # Check if name matches any target pattern
-        for pattern in self.target_modules:
-            if pattern in name:
-                return True
+        # Check for Linear layers
+        if isinstance(module, nn.Linear):
+            for pattern in self.target_modules:
+                if pattern in name:
+                    return True
         
         return False
     
     def _apply_lora(self):
         """Apply LoRA to all matching modules in the model."""
-        # Recursively replace matching Linear layers with LoRA versions
-        self._replace_linear_with_lora(self.base_model, "")
+        # Recursively replace matching modules with LoRA versions
+        self._replace_modules_with_lora(self.base_model, "")
     
-    def _replace_linear_with_lora(self, module: nn.Module, prefix: str = ""):
+    def _replace_modules_with_lora(self, module: nn.Module, prefix: str = ""):
         """
-        Recursively replace Linear layers with LoRA-adapted versions.
+        Recursively replace Linear and MultiheadAttention modules with LoRA-adapted versions.
         
         Args:
             module: Current module to process
@@ -355,21 +695,37 @@ class LoRAModel(nn.Module):
             full_name = f"{prefix}.{name}" if prefix else name
             
             if self._should_apply_lora(full_name, child):
-                # Replace with LoRA version
-                lora_layer = LoRALinear(
-                    base_layer=child,
-                    rank=self.rank,
-                    alpha=self.alpha,
-                    dropout=self.dropout,
-                    merge_weights=self.merge_weights,
-                    fan_in_fan_out=self.fan_in_fan_out,
-                    bias=self.bias,
-                )
-                setattr(module, name, lora_layer)
-                self.lora_modules.add(full_name)
+                if isinstance(child, nn.MultiheadAttention):
+                    # Adapt MultiheadAttention by replacing with wrapper
+                    # Use individual adaptation flags from config
+                    lora_attn = adapt_multihead_attention_with_lora(
+                        attn_module=child,
+                        rank=self.rank,
+                        alpha=self.alpha,
+                        dropout=self.dropout,
+                        adapt_q=self.adapt_q,
+                        adapt_k=self.adapt_k,
+                        adapt_v=self.adapt_v,
+                        adapt_out=self.adapt_out,
+                    )
+                    setattr(module, name, lora_attn)
+                    self.lora_modules.add(full_name)
+                elif isinstance(child, nn.Linear):
+                    # Replace Linear with LoRALinear
+                    lora_layer = LoRALinear(
+                        base_layer=child,
+                        rank=self.rank,
+                        alpha=self.alpha,
+                        dropout=self.dropout,
+                        merge_weights=self.merge_weights,
+                        fan_in_fan_out=self.fan_in_fan_out,
+                        bias=self.bias,
+                    )
+                    setattr(module, name, lora_layer)
+                    self.lora_modules.add(full_name)
             else:
                 # Recursively process children
-                self._replace_linear_with_lora(child, full_name)
+                self._replace_modules_with_lora(child, full_name)
     
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Forward pass through the model."""
@@ -397,13 +753,49 @@ class LoRAModel(nn.Module):
     def get_lora_parameters(self) -> List[nn.Parameter]:
         """Get all LoRA parameters for optimization."""
         lora_params = []
+        seen_modules = set()  # Track modules we've already processed
+        
         for module in self.base_model.modules():
-            if isinstance(module, LoRALinear):
+            # Skip if we've already processed this module
+            if id(module) in seen_modules:
+                continue
+            
+            if isinstance(module, LoRAMultiheadAttention):
+                # Collect LoRA params from MultiheadAttention wrapper
+                # Mark this module as seen
+                seen_modules.add(id(module))
+                
+                if module.adapt_q and hasattr(module, 'q_proj') and isinstance(module.q_proj, LoRAParameter):
+                    seen_modules.add(id(module.q_proj))  # Mark as seen
+                    lora_params.extend([module.q_proj.lora_A, module.q_proj.lora_B])
+                if module.adapt_k and hasattr(module, 'k_proj') and isinstance(module.k_proj, LoRAParameter):
+                    seen_modules.add(id(module.k_proj))  # Mark as seen
+                    lora_params.extend([module.k_proj.lora_A, module.k_proj.lora_B])
+                if module.adapt_v and hasattr(module, 'v_proj') and isinstance(module.v_proj, LoRAParameter):
+                    seen_modules.add(id(module.v_proj))  # Mark as seen
+                    lora_params.extend([module.v_proj.lora_A, module.v_proj.lora_B])
+                
+                # Collect out_proj params if it's LoRALinear
+                if isinstance(module.out_proj, LoRALinear):
+                    seen_modules.add(id(module.out_proj))  # Mark as seen to avoid double-counting
+                    lora_params.extend([module.out_proj.lora.lora_A, module.out_proj.lora.lora_B])
+                    if module.out_proj._bias is not None:
+                        lora_params.append(module.out_proj._bias)
+                    if module.out_proj._lora_bias is not None:
+                        lora_params.append(module.out_proj._lora_bias)
+            
+            elif isinstance(module, LoRALinear):
+                seen_modules.add(id(module))
                 lora_params.extend([module.lora.lora_A, module.lora.lora_B])
                 if module._bias is not None:
                     lora_params.append(module._bias)
                 if module._lora_bias is not None:
                     lora_params.append(module._lora_bias)
+            
+            elif isinstance(module, LoRAParameter):
+                seen_modules.add(id(module))
+                lora_params.extend([module.lora_A, module.lora_B])
+        
         return lora_params
     
     def print_lora_info(self):

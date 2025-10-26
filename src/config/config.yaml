@@ -94,11 +94,11 @@ continual:
       - "fc1"                    # First linear layer in MLP
       - "fc2"                    # Second linear layer in MLP
       # --- For OpenCLIP/CLIP models (ResidualAttentionBlock) ---
-      # NOTE: Cannot adapt in_proj_weight in nn.MultiheadAttention (it's a Parameter, not a module)
-      # Use these instead:
-      # - "attn.out_proj"        # Attention output projection (NonDynamicallyQuantizableLinear)
-      # - "mlp.c_fc"             # MLP first layer
-      # - "mlp.c_proj"           # MLP second layer
+      # With MultiheadAttention support, you can now adapt all attention projections:
+      - "attn"                   # Adapt Q, K, V, out_proj (see multihead_attention config below)
+      # - "attn.out_proj"        # Alternative: Only adapt output projection (old behavior)
+      - "mlp.c_fc"               # MLP first layer
+      - "mlp.c_proj"             # MLP second layer
       # --- For other architectures ---
       # - "attention.query"      # Separate Q projection
       # - "attention.key"        # Separate K projection  
@@ -106,6 +106,13 @@ continual:
     merge_weights: false         # Merge LoRA weights into original weights after training
     bias: "none"                 # Bias handling: "none", "all", or "lora_only"
     fan_in_fan_out: false        # Set to true for Conv1D layers (e.g., GPT-2 style)
+    # Fine-grained control for nn.MultiheadAttention adaptation
+    multihead_attention:
+      adapt_q: true              # Adapt Query projection
+      adapt_k: true              # Adapt Key projection
+      adapt_v: true              # Adapt Value projection
+      adapt_out: true            # Adapt output projection
+      # Example: For LoRA paper's recommendation, set adapt_k: false
 
   # Adapter tuning parameters (used when strategy is "adapter")
   adapter:
