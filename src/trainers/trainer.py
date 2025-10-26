@@ -309,6 +309,9 @@ class ContinualTrainer:
         # Gradient norm accumulation for epoch-wise logging
         self.grad_norm_accumulator = {}  # Dict to accumulate gradient norms by parameter name
         self.grad_norm_batch_count = 0  # Count of batches for averaging
+        
+        # Track warmed-up DataLoaders to avoid redundant warmups
+        self._warmed_loaders = set()  # Store id(loader) for warmed loaders
 
     def _setup_optimizer(self) -> torch.optim.Optimizer:
         """Setup optimizer based on configuration."""
@@ -806,6 +809,18 @@ class ContinualTrainer:
         debug_verbose = debug_enabled and self.debug_config.get("verbose", False)
         desc = "Training [DEBUG]" if debug_enabled else "Training"
 
+        # Warm up DataLoader workers on first use to avoid slow first batch
+        # This pre-spawns and initializes workers before the training loop
+        loader_id = id(train_loader)
+        if (loader_id not in self._warmed_loaders and 
+            hasattr(train_loader, 'num_workers') and train_loader.num_workers > 0):
+            if should_show_pbar:
+                print("Warming up training DataLoader workers...")
+            # Touch the first batch to initialize workers
+            _ = next(iter(train_loader))
+            # Mark this loader as warmed
+            self._warmed_loaders.add(loader_id)
+
         train_iter = tqdm(train_loader, desc=desc) if should_show_pbar else train_loader
 
         for inputs, targets in train_iter:
@@ -1048,6 +1063,18 @@ class ContinualTrainer:
         # Set description based on debug mode
         debug_enabled = self.debug_config.get("enabled", False)
         desc = "Evaluating [DEBUG]" if debug_enabled else "Evaluating"
+        
+        # Warm up DataLoader workers on first use to avoid slow first batch
+        loader_id = id(test_loader)
+        if (loader_id not in self._warmed_loaders and 
+            hasattr(test_loader, 'num_workers') and test_loader.num_workers > 0):
+            if should_show_pbar:
+                print("Warming up evaluation DataLoader workers...")
+            # Touch the first batch to initialize workers
+            with torch.no_grad():
+                _ = next(iter(test_loader))
+            # Mark this loader as warmed
+            self._warmed_loaders.add(loader_id)
 
         with torch.no_grad():
             test_iter = (

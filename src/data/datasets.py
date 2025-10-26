@@ -151,7 +151,8 @@ class ContinualDataset:
                 batch_size=batch_size,
                 shuffle=False,  # Sampler handles shuffling
                 num_workers=num_workers,
-                persistent_workers=True,
+                persistent_workers=True if num_workers > 0 else False,
+                prefetch_factor=2 if num_workers > 0 else None,
                 sampler=train_sampler,
                 pin_memory=True,
             )
@@ -161,7 +162,8 @@ class ContinualDataset:
                 batch_size=(batch_size if eval_batch_size is None else eval_batch_size),
                 shuffle=False,
                 num_workers=num_workers,
-                persistent_workers=True,
+                persistent_workers=True if num_workers > 0 else False,
+                prefetch_factor=2 if num_workers > 0 else None,
                 sampler=test_sampler,
                 pin_memory=True,
             )
@@ -172,7 +174,8 @@ class ContinualDataset:
                 batch_size=batch_size,
                 shuffle=True,
                 num_workers=num_workers,
-                persistent_workers=True,
+                persistent_workers=True if num_workers > 0 else False,
+                prefetch_factor=2 if num_workers > 0 else None,
                 pin_memory=True,
             )
 
@@ -181,7 +184,8 @@ class ContinualDataset:
                 batch_size=(batch_size if eval_batch_size is None else eval_batch_size),
                 shuffle=False,
                 num_workers=num_workers,
-                persistent_workers=True,
+                persistent_workers=True if num_workers > 0 else False,
+                prefetch_factor=2 if num_workers > 0 else None,
                 pin_memory=True,
             )
 
