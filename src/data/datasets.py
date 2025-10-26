@@ -18,6 +18,7 @@ from torch.utils.data import (
     Subset,
 )
 from torchvision.datasets import ImageFolder
+from tqdm import tqdm
 
 
 class ContinualDataset:
@@ -221,14 +222,19 @@ class ContinualDataset:
             # Create a defaultdict to store indices by class
             class_indices = defaultdict(list)
             dataset_size = len(dataset)
-
-            # Function to process a chunk of the dataset
-            def process_chunk(start_idx, end_idx):
-                chunk_indices = defaultdict(list)
-                for i in range(start_idx, min(end_idx, dataset_size)):
-                    _, target = dataset[i]
-                    chunk_indices[target].append(i)
-                return chunk_indices
+            
+            # Try to access targets directly without loading images for speed
+            targets_list = None
+            if hasattr(dataset, "targets"):
+                # Many torchvision datasets have a targets attribute
+                targets_list = dataset.targets
+                print("Using dataset.targets for fast indexing")
+            elif hasattr(dataset, "samples"):
+                # ImageFolder datasets have samples as (path, target) tuples
+                targets_list = [s[1] for s in dataset.samples]
+                print("Using dataset.samples for fast indexing")
+            else:
+                print("No fast target access found, will load dataset items (slower)")
 
             # Split the dataset into chunks for parallel processing
             chunk_size = max(1, dataset_size // num_workers)
@@ -236,10 +242,36 @@ class ContinualDataset:
                 (i, min(i + chunk_size, dataset_size))
                 for i in range(0, dataset_size, chunk_size)
             ]
+            
+            # Function to process a chunk of the dataset with progress bar
+            def process_chunk(chunk_id, start_idx, end_idx):
+                chunk_indices = defaultdict(list)
+                chunk_len = min(end_idx, dataset_size) - start_idx
+                # Create a progress bar for this chunk
+                pbar = tqdm(
+                    total=chunk_len,
+                    desc=f"Chunk {chunk_id + 1}/{len(chunks)}",
+                    position=chunk_id,
+                    leave=True,
+                )
+                for i in range(start_idx, min(end_idx, dataset_size)):
+                    # Fast path: use pre-extracted targets list
+                    if targets_list is not None:
+                        target = targets_list[i]
+                    else:
+                        # Slow path: load dataset item (includes image loading)
+                        _, target = dataset[i]
+                    chunk_indices[target].append(i)
+                    pbar.update(1)
+                pbar.close()
+                return chunk_indices
 
-            # Process chunks in parallel
+            # Process chunks in parallel with progress bars
             with ThreadPoolExecutor(max_workers=num_workers) as executor:
-                chunk_results = list(executor.map(lambda x: process_chunk(*x), chunks))
+                chunk_results = list(executor.map(
+                    lambda x: process_chunk(x[0], x[1][0], x[1][1]),
+                    enumerate(chunks)
+                ))
 
             # Merge results from all chunks
             for chunk_result in chunk_results:
