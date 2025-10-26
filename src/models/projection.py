@@ -437,7 +437,7 @@ class ProofFusionLayer(nn.Module):
         
         # Create new prompts for the current task
         new_prompts = nn.Parameter(
-            torch.randn(self.num_context_prompts, self.feature_dim) * 0.02
+            torch.randn(self.num_context_prompts, self.feature_dim)  # Follow PROOF initialization
         )
         self.context_prompts.append(new_prompts)
         
