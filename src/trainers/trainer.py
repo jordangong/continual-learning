@@ -5,6 +5,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 import torch
 import torch.distributed as dist
 import torch.nn as nn
+import torch.nn.functional as F
 import torch.optim as optim
 import wandb
 from torch import amp
@@ -88,6 +89,15 @@ class ContinualTrainer:
         self.calibration_method = self.calibration_config.get("method", "rigid")  # rigid, affine, nonlinear
         self.calibration_reg_weight = self.calibration_config.get("regularization_weight", 0.01)
         self.calibration_strength = self.calibration_config.get("strength", 1.0)  # 0.0 = original, 1.0 = calibrated
+
+        # Competitive distillation configuration
+        self.distillation_config = self.continual_config.get("distillation", {"enabled": False})
+        self.distillation_enabled = self.distillation_config.get("enabled", False)
+        self.distillation_gt_loss_weight = self.distillation_config.get("gt_loss_weight", 1.0)
+        self.distillation_distill_loss_weight = self.distillation_config.get("distill_loss_weight", 0.5)
+        self.distillation_temperature = self.distillation_config.get("temperature", 2.0)
+        self.distillation_loss_ratio_clip = self.distillation_config.get("loss_ratio_clip", 5.0)
+        self.distillation_epsilon = self.distillation_config.get("epsilon", 1e-8)
 
         # Storage for historical prototypes and checkpoint paths for calibration
         self.historical_prototypes = {}  # Format: {step: {class_idx: prototype}}
@@ -836,7 +846,15 @@ class ContinualTrainer:
                     device_type=self.device_type, dtype=self.mixed_precision_dtype
                 ):
                     # Compute loss based on configuration
-                    if self.use_pretraining_loss and self.use_regular_loss:
+                    if self.distillation_enabled:
+                        # Competitive distillation loss (hybrid mode)
+                        loss, outputs = self._compute_competitive_distillation_loss(inputs, targets)
+                        
+                        # Add pretraining loss if configured (distillation + pretraining)
+                        if self.use_pretraining_loss:
+                            pretraining_loss = self._compute_pretraining_loss(inputs, targets)
+                            loss = loss + self.pretraining_loss_weight * pretraining_loss
+                    elif self.use_pretraining_loss and self.use_regular_loss:
                         # Combined: pretraining + regular loss
                         loss, outputs = self._compute_combined_loss(inputs, targets)
                     elif self.use_pretraining_loss:
@@ -924,7 +942,15 @@ class ContinualTrainer:
             else:
                 # Standard precision training
                 # Compute loss based on configuration
-                if self.use_pretraining_loss and self.use_regular_loss:
+                if self.distillation_enabled:
+                    # Competitive distillation loss (hybrid mode)
+                    loss, outputs = self._compute_competitive_distillation_loss(inputs, targets)
+                    
+                    # Add pretraining loss if configured (distillation + pretraining)
+                    if self.use_pretraining_loss:
+                        pretraining_loss = self._compute_pretraining_loss(inputs, targets)
+                        loss = loss + self.pretraining_loss_weight * pretraining_loss
+                elif self.use_pretraining_loss and self.use_regular_loss:
                     # Combined: pretraining + regular loss
                     loss, outputs = self._compute_combined_loss(inputs, targets)
                 elif self.use_pretraining_loss:
@@ -1633,6 +1659,145 @@ class ContinualTrainer:
         )
 
         return total_loss, outputs
+
+    def _compute_competitive_distillation_loss(
+        self,
+        inputs: torch.Tensor,
+        targets: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Compute competitive distillation loss with ratio-based soft switching.
+        
+        The method computes separate losses for text and learned classifier logits,
+        then uses their ratio to determine bidirectional distillation weights.
+        Better performing logits teach the worse performing ones.
+        
+        Args:
+            inputs: Input images [batch_size, C, H, W]
+            targets: Target class labels [batch_size]
+        
+        Returns:
+            Tuple of (total_loss, combined_outputs for accuracy computation)
+        """
+        # Get model reference
+        model_to_use = self.model.module if hasattr(self.model, "module") else self.model
+        
+        # Check if model supports separate logits (hybrid mode)
+        if not (hasattr(model_to_use, "classifier") and 
+                hasattr(model_to_use.classifier, "mode") and 
+                model_to_use.classifier.mode == "hybrid"):
+            # Fallback to regular loss if not in hybrid mode
+            return self._compute_regular_loss(inputs, targets)
+        
+        # Forward pass to get both logits separately
+        text_logits, learned_logits = model_to_use.classifier(
+            model_to_use.backbone(inputs), 
+            return_separate_logits=True
+        )
+        
+        # Apply logit masking to both for loss computation
+        text_logits_masked = self._apply_logit_masking(text_logits, targets)
+        learned_logits_masked = self._apply_logit_masking(learned_logits, targets)
+        
+        # Compute per-sample losses (no reduction) on masked logits
+        loss_text_per_sample = F.cross_entropy(text_logits_masked, targets, reduction='none')
+        loss_classifier_per_sample = F.cross_entropy(learned_logits_masked, targets, reduction='none')
+        
+        # Compute ground truth losses (mean over batch)
+        loss_text = loss_text_per_sample.mean()
+        loss_classifier = loss_classifier_per_sample.mean()
+        gt_loss = loss_text + loss_classifier
+        
+        # Compute ratio-based weights for distillation
+        # When classifier is better (smaller loss), use it to teach text
+        # ratio_c2t = (loss_text - loss_classifier) / (loss_classifier + eps)
+        # When text is better, use it to teach classifier
+        # ratio_t2c = (loss_classifier - loss_text) / (loss_text + eps)
+        
+        eps = self.distillation_epsilon
+        
+        # Compute ratios per sample
+        ratio_c2t = (loss_text_per_sample - loss_classifier_per_sample) / (loss_classifier_per_sample + eps)
+        ratio_t2c = (loss_classifier_per_sample - loss_text_per_sample) / (loss_text_per_sample + eps)
+        
+        # Clip ratios to avoid extreme values
+        ratio_c2t = torch.clamp(ratio_c2t, -self.distillation_loss_ratio_clip, self.distillation_loss_ratio_clip)
+        ratio_t2c = torch.clamp(ratio_t2c, -self.distillation_loss_ratio_clip, self.distillation_loss_ratio_clip)
+        
+        # Apply sigmoid to get soft weights in [0, 1]
+        # Positive ratio -> weight close to 1, negative -> weight close to 0
+        weight_c2t = torch.sigmoid(ratio_c2t)  # Weight for classifier -> text distillation
+        weight_t2c = torch.sigmoid(ratio_t2c)  # Weight for text -> classifier distillation
+        
+        # Compute distillation targets (soft labels with temperature)
+        # IMPORTANT: Only compute KL on current task classes to avoid -inf from masking
+        T = self.distillation_temperature
+        
+        # Extract current task class logits for KL divergence
+        if self.mask_logits and self.current_task_classes is not None:
+            # Only compute KL on current task classes (excluding masked -inf logits)
+            text_logits_current = text_logits[:, self.current_task_classes]
+            learned_logits_current = learned_logits[:, self.current_task_classes]
+        else:
+            # No masking, use all classes
+            text_logits_current = text_logits
+            learned_logits_current = learned_logits
+        
+        # Use log-space for numerical stability
+        # Compute log probabilities for both student and teacher on current classes only
+        with torch.no_grad():
+            log_soft_text_targets = F.log_softmax(text_logits_current / T, dim=1)
+            log_soft_classifier_targets = F.log_softmax(learned_logits_current / T, dim=1)
+        
+        # Compute KL divergence for bidirectional distillation (per sample, no reduction)
+        # Use log_target=True for numerical stability (available in PyTorch >= 1.5)
+        # KL(P||Q) = sum(P * (log P - log Q))
+        
+        # Classifier -> Text: text learns from classifier
+        # KL(classifier || text) - text is student, classifier is teacher
+        distill_c2t = F.kl_div(
+            F.log_softmax(text_logits_current / T, dim=1),
+            log_soft_classifier_targets,
+            reduction='none',
+            log_target=True
+        ).sum(dim=1) * (T ** 2)
+        
+        # Text -> Classifier: classifier learns from text
+        # KL(text || classifier) - classifier is student, text is teacher
+        distill_t2c = F.kl_div(
+            F.log_softmax(learned_logits_current / T, dim=1),
+            log_soft_text_targets,
+            reduction='none',
+            log_target=True
+        ).sum(dim=1) * (T ** 2)
+        
+        # Apply ratio-based weights and average over batch
+        weighted_distill_c2t = (weight_c2t * distill_c2t).mean()
+        weighted_distill_t2c = (weight_t2c * distill_t2c).mean()
+        
+        # Total distillation loss
+        distill_loss = weighted_distill_c2t + weighted_distill_t2c
+        
+        # Combine ground truth loss and distillation loss
+        total_loss = (
+            self.distillation_gt_loss_weight * gt_loss +
+            self.distillation_distill_loss_weight * distill_loss
+        )
+        
+        # Return logits for accuracy computation (use masked logits)
+        # If disable_learned_classifier_at_inference is enabled and in eval mode, use text-only
+        if (hasattr(model_to_use.classifier, 'disable_learned_classifier_at_inference') and
+            model_to_use.classifier.disable_learned_classifier_at_inference and
+            not model_to_use.training):
+            # Eval mode with disabled learned classifier: use text-only (masked)
+            combined_logits = text_logits_masked
+        else:
+            # Training mode or eval without flag: use hybrid combination (masked)
+            hybrid_weight = model_to_use.classifier.hybrid_weight
+            if isinstance(hybrid_weight, nn.Parameter):
+                hybrid_weight = hybrid_weight.item()
+            combined_logits = hybrid_weight * text_logits_masked + (1 - hybrid_weight) * learned_logits_masked
+        
+        return total_loss, combined_logits
 
     def _compute_ewc_loss(self) -> torch.Tensor:
         """

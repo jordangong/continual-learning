@@ -1,5 +1,5 @@
 import copy
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import open_clip
 import timm
@@ -371,14 +371,19 @@ class CLIPClassifier(nn.Module):
 
         return all_embeddings
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, return_separate_logits: bool = False) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
         """Forward pass using text embeddings and/or learned classifier.
 
         Args:
             x: Image features [batch_size, feature_dim]
+            return_separate_logits: If True and in hybrid mode, return (text_logits, learned_logits) separately
+                                    instead of combined logits. Used for competitive distillation.
 
         Returns:
-            Logits [batch_size, num_classes]
+            If return_separate_logits=False or mode='text':
+                Logits [batch_size, num_classes]
+            If return_separate_logits=True and mode='hybrid':
+                Tuple of (text_logits, learned_logits) [batch_size, num_classes] each
         """
         # Get temperature value
         if self.use_log_temperature:
@@ -509,6 +514,10 @@ class CLIPClassifier(nn.Module):
                 learned_logits = torch.matmul(x, fused_prototypes.t()) * temperature
             else:
                 learned_logits = self.learned_classifier(x) * temperature
+            
+            # Return separate logits for competitive distillation if requested
+            if return_separate_logits:
+                return text_logits, learned_logits
             
             # Weighted combination
             logits = (

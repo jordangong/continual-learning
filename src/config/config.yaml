@@ -65,6 +65,15 @@ continual:
     regularization_weight: 0.01 # Regularization weight for nonlinear transform (L2 penalty)
     strength: 1.0              # Calibration strength: 0.0 = original prototypes only, 1.0 = calibrated prototypes only
 
+  # Competitive distillation parameters (for hybrid mode with text + learned classifier)
+  distillation:
+    enabled: false             # Enable competitive bidirectional distillation
+    gt_loss_weight: 1.0        # Weight for ground truth supervision loss
+    distill_loss_weight: 0.5   # Weight for distillation loss
+    temperature: 2.0           # Temperature for distillation (higher = softer targets)
+    loss_ratio_clip: 5.0       # Clip loss ratio to avoid extreme values
+    epsilon: 1e-8              # Small constant to avoid division by zero
+
   # Prompt tuning parameters (used when strategy is "prompt_tuning")
   prompt_tuning:
     prompt_length: 10            # Number of prompt tokens
