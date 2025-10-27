@@ -124,6 +124,7 @@ class CLIPClassifier(nn.Module):
         learnable_logit_bias: bool = False,
         learnable_hybrid_weight: bool = False,
         normalize_class_names: bool = False,
+        disable_learned_classifier_at_inference: bool = False,
         device: Optional[torch.device] = None,
         text_projection: Optional[nn.Module] = None,
         vision_projection: Optional[nn.Module] = None,
@@ -153,6 +154,7 @@ class CLIPClassifier(nn.Module):
             learnable_logit_bias: Whether logit_bias should be learnable
             learnable_hybrid_weight: Whether hybrid_weight should be learnable (only used in hybrid mode)
             normalize_class_names: Replace underscores with spaces in class names before creating prompts
+            disable_learned_classifier_at_inference: Disable learned classifier during inference (eval mode), use text-only
             device: Device to place text embeddings on
         """
         super().__init__()
@@ -174,6 +176,7 @@ class CLIPClassifier(nn.Module):
             self.hybrid_weight = hybrid_weight
         self.device = device if device is not None else torch.device("cpu")
         self.learned_classifier_type = learned_classifier_type
+        self.disable_learned_classifier_at_inference = disable_learned_classifier_at_inference
 
         # Temperature handling (similar to ClassifierHead)
         self.use_log_temperature = use_log_temperature
@@ -415,6 +418,29 @@ class CLIPClassifier(nn.Module):
         elif self.mode == "hybrid":
             # Combination of text and learned classifiers
             # Both text encoder and learned classifier can be trainable
+
+            # Check if we should disable learned classifier during inference
+            # This makes inference use CLIP text classifier only (more versatile and elegant)
+            if self.disable_learned_classifier_at_inference and not self.training:
+                # Use text-only inference during eval mode
+                # Get text embeddings (recompute if text encoder is trainable)
+                if self.freeze_text_encoder:
+                    text_embeddings = self.text_embeddings
+                else:
+                    text_embeddings = self._compute_text_embeddings()
+                
+                # Normalize image features if specified
+                if self.normalize:
+                    x = F.normalize(x, p=2, dim=1)
+                
+                # Compute text-only logits
+                logits = torch.matmul(x, text_embeddings.t()) * temperature
+                
+                # Apply logit_bias if present
+                if self.logit_bias is not None:
+                    logits = logits + self.logit_bias
+                
+                return logits
 
             # Get text embeddings (recompute if text encoder is trainable)
             if self.freeze_text_encoder:
@@ -890,6 +916,9 @@ class PretrainedModel(nn.Module):
             )
             learnable_logit_bias = classifier_config.get("learnable_logit_bias", False)
             normalize_class_names = classifier_config.get("normalize_class_names", False)
+            disable_learned_classifier_at_inference = classifier_config.get(
+                "disable_learned_classifier_at_inference", False
+            )
 
             # Extract CLIP's pre-trained temperature if requested
             if use_pretrained_temperature and hasattr(clip_model, "logit_scale"):
@@ -957,6 +986,7 @@ class PretrainedModel(nn.Module):
                 learnable_logit_bias=learnable_logit_bias,
                 learnable_hybrid_weight=learnable_hybrid_weight,
                 normalize_class_names=normalize_class_names,
+                disable_learned_classifier_at_inference=disable_learned_classifier_at_inference,
                 device=self.device,
             )
 

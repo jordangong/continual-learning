@@ -48,6 +48,7 @@ classifier:
   # Hybrid mode settings (only used if mode: hybrid)
   hybrid_weight: 0.5  # Weight for text vs learned (0.0=learned only, 1.0=text only)
   learnable_hybrid_weight: false  # Make hybrid_weight a learnable parameter
+  disable_learned_classifier_at_inference: false  # Disable learned classifier during inference (eval mode), use text-only
 
   # Learned classifier settings (for linear/hybrid modes)
   learned_classifier_type: linear  # Options: linear, mlp, prototypical
