@@ -1748,6 +1748,11 @@ class ContinualTrainer:
         ratio_c2t = (loss_text_per_sample - loss_classifier_per_sample) / (loss_classifier_per_sample + eps)
         ratio_t2c = (loss_classifier_per_sample - loss_text_per_sample) / (loss_text_per_sample + eps)
         
+        # Detach ratios: treat as data-dependent weights, not optimization targets
+        # This prevents gradients from flowing through the weighting mechanism
+        ratio_c2t = ratio_c2t.detach()
+        ratio_t2c = ratio_t2c.detach()
+        
         # Clip ratios to avoid extreme values
         ratio_c2t = torch.clamp(ratio_c2t, -self.distillation_loss_ratio_clip, self.distillation_loss_ratio_clip)
         ratio_t2c = torch.clamp(ratio_t2c, -self.distillation_loss_ratio_clip, self.distillation_loss_ratio_clip)
