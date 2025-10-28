@@ -68,6 +68,8 @@ continual:
   # Competitive distillation parameters (for hybrid mode with text + learned classifier)
   distillation:
     enabled: false             # Enable competitive bidirectional distillation
+    direction: "bidirectional" # Direction: "bidirectional", "text_to_learned", "learned_to_text"
+    use_logits_mixing: false   # Use logits mixing (blend targets) vs weighted loss (weight KL)
     gt_loss_weight: 1.0        # Weight for ground truth supervision loss
     distill_loss_weight: 0.5   # Weight for distillation loss
     temperature: 2.0           # Temperature for distillation (higher = softer targets)

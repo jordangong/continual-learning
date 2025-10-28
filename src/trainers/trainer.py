@@ -93,11 +93,21 @@ class ContinualTrainer:
         # Competitive distillation configuration
         self.distillation_config = self.continual_config.get("distillation", {"enabled": False})
         self.distillation_enabled = self.distillation_config.get("enabled", False)
+        self.distillation_direction = self.distillation_config.get("direction", "bidirectional")
+        self.distillation_use_logits_mixing = self.distillation_config.get("use_logits_mixing", False)
         self.distillation_gt_loss_weight = self.distillation_config.get("gt_loss_weight", 1.0)
         self.distillation_distill_loss_weight = self.distillation_config.get("distill_loss_weight", 0.5)
         self.distillation_temperature = self.distillation_config.get("temperature", 2.0)
         self.distillation_loss_ratio_clip = self.distillation_config.get("loss_ratio_clip", 5.0)
         self.distillation_epsilon = self.distillation_config.get("epsilon", 1e-8)
+        
+        # Validate distillation direction
+        valid_directions = ["bidirectional", "text_to_learned", "learned_to_text"]
+        if self.distillation_direction not in valid_directions:
+            raise ValueError(
+                f"Invalid distillation direction: {self.distillation_direction}. "
+                f"Must be one of {valid_directions}"
+            )
 
         # Storage for historical prototypes and checkpoint paths for calibration
         self.historical_prototypes = {}  # Format: {step: {class_idx: prototype}}
@@ -1668,7 +1678,12 @@ class ContinualTrainer:
         """Compute competitive distillation loss with ratio-based soft switching.
         
         The method computes separate losses for text and learned classifier logits,
-        then uses their ratio to determine bidirectional distillation weights.
+        then uses their ratio to determine distillation weights. Knowledge transfer
+        can be bidirectional or asymmetric based on self.distillation_direction:
+        - "bidirectional": Both classifiers learn from each other
+        - "text_to_learned": Only learned classifier learns from text
+        - "learned_to_text": Only text classifier learns from learned
+        
         Better performing logits teach the worse performing ones.
         
         Args:
@@ -1742,40 +1757,94 @@ class ContinualTrainer:
             text_logits_current = text_logits
             learned_logits_current = learned_logits
         
-        # Use log-space for numerical stability
-        # Compute log probabilities for both student and teacher on current classes only
-        with torch.no_grad():
-            log_soft_text_targets = F.log_softmax(text_logits_current / T, dim=1)
-            log_soft_classifier_targets = F.log_softmax(learned_logits_current / T, dim=1)
+        distill_loss = torch.tensor(0.0, device=text_logits.device)
         
-        # Compute KL divergence for bidirectional distillation (per sample, no reduction)
-        # Use log_target=True for numerical stability (available in PyTorch >= 1.5)
-        # KL(P||Q) = sum(P * (log P - log Q))
+        if self.distillation_use_logits_mixing:
+            # LOGITS MIXING APPROACH: Blend logits before softmax to create interpolated targets
+            # This provides softer, self-anchored distillation targets
+            
+            # Learned -> Text: text learns from mixed target
+            if self.distillation_direction in ["bidirectional", "learned_to_text"]:
+                # Mix logits: weight_c2t * classifier + (1 - weight_c2t) * text
+                # Expand weight_c2t to match logits shape [batch_size, 1]
+                weight_c2t_expanded = weight_c2t.unsqueeze(1)
+                mixed_target_for_text = (
+                    weight_c2t_expanded * learned_logits_current / T +
+                    (1 - weight_c2t_expanded) * text_logits_current / T
+                )
+                
+                # Compute KL divergence to mixed target
+                with torch.no_grad():
+                    log_soft_mixed_target = F.log_softmax(mixed_target_for_text, dim=1)
+                
+                distill_l2t = F.kl_div(
+                    F.log_softmax(text_logits_current / T, dim=1),
+                    log_soft_mixed_target,
+                    reduction='batchmean',
+                    log_target=True
+                ) * (T ** 2)
+                
+                distill_loss = distill_loss + distill_l2t
+            
+            # Text -> Learned: classifier learns from mixed target
+            if self.distillation_direction in ["bidirectional", "text_to_learned"]:
+                # Mix logits: weight_t2c * text + (1 - weight_t2c) * classifier
+                weight_t2c_expanded = weight_t2c.unsqueeze(1)
+                mixed_target_for_learned = (
+                    weight_t2c_expanded * text_logits_current / T +
+                    (1 - weight_t2c_expanded) * learned_logits_current / T
+                )
+                
+                # Compute KL divergence to mixed target
+                with torch.no_grad():
+                    log_soft_mixed_target = F.log_softmax(mixed_target_for_learned, dim=1)
+                
+                distill_t2l = F.kl_div(
+                    F.log_softmax(learned_logits_current / T, dim=1),
+                    log_soft_mixed_target,
+                    reduction='batchmean',
+                    log_target=True
+                ) * (T ** 2)
+                
+                distill_loss = distill_loss + distill_t2l
         
-        # Classifier -> Text: text learns from classifier
-        # KL(classifier || text) - text is student, classifier is teacher
-        distill_c2t = F.kl_div(
-            F.log_softmax(text_logits_current / T, dim=1),
-            log_soft_classifier_targets,
-            reduction='none',
-            log_target=True
-        ).sum(dim=1) * (T ** 2)
-        
-        # Text -> Classifier: classifier learns from text
-        # KL(text || classifier) - classifier is student, text is teacher
-        distill_t2c = F.kl_div(
-            F.log_softmax(learned_logits_current / T, dim=1),
-            log_soft_text_targets,
-            reduction='none',
-            log_target=True
-        ).sum(dim=1) * (T ** 2)
-        
-        # Apply ratio-based weights and average over batch
-        weighted_distill_c2t = (weight_c2t * distill_c2t).mean()
-        weighted_distill_t2c = (weight_t2c * distill_t2c).mean()
-        
-        # Total distillation loss
-        distill_loss = weighted_distill_c2t + weighted_distill_t2c
+        else:
+            # WEIGHTED LOSS APPROACH: Compute KL to pure teacher targets, then weight the loss
+            # This provides stronger, direct teacher signals
+            
+            # Use log-space for numerical stability
+            # Compute log probabilities for both student and teacher on current classes only
+            with torch.no_grad():
+                log_soft_text_targets = F.log_softmax(text_logits_current / T, dim=1)
+                log_soft_classifier_targets = F.log_softmax(learned_logits_current / T, dim=1)
+            
+            # Learned -> Text: text learns from classifier (classifier is teacher)
+            if self.distillation_direction in ["bidirectional", "learned_to_text"]:
+                # KL(classifier || text) - text is student, classifier is teacher
+                distill_l2t = F.kl_div(
+                    F.log_softmax(text_logits_current / T, dim=1),
+                    log_soft_classifier_targets,
+                    reduction='none',
+                    log_target=True
+                ).sum(dim=1) * (T ** 2)
+                
+                # Apply ratio-based weights and average over batch
+                weighted_distill_l2t = (weight_c2t * distill_l2t).mean()
+                distill_loss = distill_loss + weighted_distill_l2t
+            
+            # Text -> Learned: classifier learns from text (text is teacher)
+            if self.distillation_direction in ["bidirectional", "text_to_learned"]:
+                # KL(text || classifier) - classifier is student, text is teacher
+                distill_t2l = F.kl_div(
+                    F.log_softmax(learned_logits_current / T, dim=1),
+                    log_soft_text_targets,
+                    reduction='none',
+                    log_target=True
+                ).sum(dim=1) * (T ** 2)
+                
+                # Apply ratio-based weights and average over batch
+                weighted_distill_t2l = (weight_t2c * distill_t2l).mean()
+                distill_loss = distill_loss + weighted_distill_t2l
         
         # Combine ground truth loss and distillation loss
         total_loss = (
