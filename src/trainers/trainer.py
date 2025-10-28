@@ -95,6 +95,7 @@ class ContinualTrainer:
         self.distillation_enabled = self.distillation_config.get("enabled", False)
         self.distillation_direction = self.distillation_config.get("direction", "bidirectional")
         self.distillation_use_logits_mixing = self.distillation_config.get("use_logits_mixing", False)
+        self.distillation_use_hybrid_weight_for_gt_loss = self.distillation_config.get("use_hybrid_weight_for_gt_loss", False)
         self.distillation_gt_loss_weight = self.distillation_config.get("gt_loss_weight", 1.0)
         self.distillation_distill_loss_weight = self.distillation_config.get("distill_loss_weight", 0.5)
         self.distillation_temperature = self.distillation_config.get("temperature", 2.0)
@@ -1686,6 +1687,11 @@ class ContinualTrainer:
         
         Better performing logits teach the worse performing ones.
         
+        Ground truth loss weighting:
+        - If use_hybrid_weight_for_gt_loss=False (default): gt_loss = loss_text + loss_classifier
+        - If use_hybrid_weight_for_gt_loss=True: gt_loss = hybrid_weight * loss_text + (1 - hybrid_weight) * loss_classifier
+          This aligns training objective with inference behavior.
+        
         Args:
             inputs: Input images [batch_size, C, H, W]
             targets: Target class labels [batch_size]
@@ -1720,7 +1726,15 @@ class ContinualTrainer:
         # Compute ground truth losses (mean over batch)
         loss_text = loss_text_per_sample.mean()
         loss_classifier = loss_classifier_per_sample.mean()
-        gt_loss = loss_text + loss_classifier
+        
+        # Combine ground truth losses
+        if self.distillation_use_hybrid_weight_for_gt_loss:
+            # Weight by hybrid_weight to align training with inference behavior
+            hybrid_weight = model_to_use.classifier.hybrid_weight
+            gt_loss = hybrid_weight * loss_text + (1 - hybrid_weight) * loss_classifier
+        else:
+            # Equal weighting (default): both classifiers trained equally strong
+            gt_loss = loss_text + loss_classifier
         
         # Compute ratio-based weights for distillation
         # When classifier is better (smaller loss), use it to teach text
