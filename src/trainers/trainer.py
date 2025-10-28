@@ -96,6 +96,7 @@ class ContinualTrainer:
         self.distillation_direction = self.distillation_config.get("direction", "bidirectional")
         self.distillation_use_logits_mixing = self.distillation_config.get("use_logits_mixing", False)
         self.distillation_use_hybrid_weight_for_gt_loss = self.distillation_config.get("use_hybrid_weight_for_gt_loss", False)
+        self.distillation_use_symmetric_ratio_normalization = self.distillation_config.get("use_symmetric_ratio_normalization", True)
         self.distillation_gt_loss_weight = self.distillation_config.get("gt_loss_weight", 1.0)
         self.distillation_distill_loss_weight = self.distillation_config.get("distill_loss_weight", 0.5)
         self.distillation_temperature = self.distillation_config.get("temperature", 2.0)
@@ -1692,6 +1693,14 @@ class ContinualTrainer:
         - If use_hybrid_weight_for_gt_loss=True: gt_loss = hybrid_weight * loss_text + (1 - hybrid_weight) * loss_classifier
           This aligns training objective with inference behavior.
         
+        Ratio normalization:
+        - If use_symmetric_ratio_normalization=True (default): ratio = (loss_A - loss_B) / (loss_A + loss_B)
+          Symmetric, bounded in [-1, 1], ratio_t2c = -ratio_c2t
+          Weights computed via linear mapping: weight = (ratio + 1) / 2
+        - If use_symmetric_ratio_normalization=False: ratio = (loss_A - loss_B) / loss_B
+          Asymmetric, can have different magnitudes for each direction
+          Weights computed via sigmoid: weight = sigmoid(ratio)
+        
         Args:
             inputs: Input images [batch_size, C, H, W]
             targets: Target class labels [batch_size]
@@ -1745,8 +1754,17 @@ class ContinualTrainer:
         eps = self.distillation_epsilon
         
         # Compute ratios per sample
-        ratio_c2t = (loss_text_per_sample - loss_classifier_per_sample) / (loss_classifier_per_sample + eps)
-        ratio_t2c = (loss_classifier_per_sample - loss_text_per_sample) / (loss_text_per_sample + eps)
+        if self.distillation_use_symmetric_ratio_normalization:
+            # Symmetric normalization: ratio_t2c = -ratio_c2t
+            # Range: [-1, 1] when losses are equal, scales with relative difference
+            loss_sum = loss_text_per_sample + loss_classifier_per_sample + eps
+            ratio_c2t = (loss_text_per_sample - loss_classifier_per_sample) / loss_sum
+            ratio_t2c = (loss_classifier_per_sample - loss_text_per_sample) / loss_sum
+        else:
+            # Asymmetric normalization: each ratio normalized by its denominator's loss
+            # Can have different magnitudes depending on which loss is larger
+            ratio_c2t = (loss_text_per_sample - loss_classifier_per_sample) / (loss_classifier_per_sample + eps)
+            ratio_t2c = (loss_classifier_per_sample - loss_text_per_sample) / (loss_text_per_sample + eps)
         
         # Detach ratios: treat as data-dependent weights, not optimization targets
         # This prevents gradients from flowing through the weighting mechanism
@@ -1757,10 +1775,18 @@ class ContinualTrainer:
         ratio_c2t = torch.clamp(ratio_c2t, -self.distillation_loss_ratio_clip, self.distillation_loss_ratio_clip)
         ratio_t2c = torch.clamp(ratio_t2c, -self.distillation_loss_ratio_clip, self.distillation_loss_ratio_clip)
         
-        # Apply sigmoid to get soft weights in [0, 1]
-        # Positive ratio -> weight close to 1, negative -> weight close to 0
-        weight_c2t = torch.sigmoid(ratio_c2t)  # Weight for classifier -> text distillation
-        weight_t2c = torch.sigmoid(ratio_t2c)  # Weight for text -> classifier distillation
+        # Convert ratios to weights in [0, 1]
+        # Positive ratio -> weight close to 1 (stronger distillation), negative -> weight close to 0
+        if self.distillation_use_symmetric_ratio_normalization:
+            # Linear mapping for bounded symmetric ratios: [-1, 1] → [0, 1]
+            # Provides full dynamic range without sigmoid compression
+            weight_c2t = (ratio_c2t + 1.0) / 2.0
+            weight_t2c = (ratio_t2c + 1.0) / 2.0
+        else:
+            # Sigmoid for unbounded asymmetric ratios: (-∞, ∞) → (0, 1)
+            # Handles larger range and provides smooth nonlinear mapping
+            weight_c2t = torch.sigmoid(ratio_c2t)
+            weight_t2c = torch.sigmoid(ratio_t2c)
         
         # Compute distillation targets (soft labels with temperature)
         # IMPORTANT: Only compute KL on current task classes to avoid -inf from masking
