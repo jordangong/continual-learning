@@ -501,23 +501,30 @@ class CLIPClassifier(nn.Module):
                 fused_prototypes = torch.zeros_like(image_prototypes)
                 fused_prototypes[seen_classes_mask] = fused_prototypes_seen.to(fused_prototypes.dtype)
                 
-            # Text-based logits
-            text_logits = torch.matmul(x_norm, text_embeddings.t()) * temperature
+            # Compute raw logits (without temperature scaling or bias)
+            text_logits_raw = torch.matmul(x_norm, text_embeddings.t())
 
-            # Apply logit_bias if present (CustomTextCLIP support)
-            if self.logit_bias is not None:
-                text_logits = text_logits + self.logit_bias
-
-            # Learned logits (with temperature scaling)
+            # Learned logits (raw, without temperature scaling)
             # If PROOF fusion enabled, this uses fused prototypes (prototype loss)
             if hasattr(self, "proof_fusion") and self.proof_fusion is not None and fused_prototypes is not None:
-                learned_logits = torch.matmul(x, fused_prototypes.t()) * temperature
+                learned_logits_raw = torch.matmul(x, fused_prototypes.t())
             else:
-                learned_logits = self.learned_classifier(x) * temperature
+                learned_logits_raw = self.learned_classifier(x)
             
-            # Return separate logits for competitive distillation if requested
+            # Return raw unscaled unbiased logits for competitive distillation if requested
+            # This allows distillation to control temperature independently without
+            # gradient flow to the model's temperature parameter or logit_bias
             if return_separate_logits:
-                return text_logits, learned_logits
+                return text_logits_raw, learned_logits_raw
+            
+            # Apply temperature scaling for final predictions
+            text_logits = text_logits_raw * temperature
+            learned_logits = learned_logits_raw * temperature
+            
+            # Apply logit_bias AFTER temperature scaling (CustomTextCLIP support)
+            # This ensures bias has consistent effect regardless of temperature value
+            if self.logit_bias is not None:
+                text_logits = text_logits + self.logit_bias
             
             # Weighted combination
             logits = (

@@ -1688,6 +1688,13 @@ class ContinualTrainer:
         
         Better performing logits teach the worse performing ones.
         
+        Temperature scaling:
+        - Model returns RAW UNSCALED logits when return_separate_logits=True
+        - Ground truth loss: Raw logits scaled by model temperature (+ logit_bias if present)
+        - Distillation loss: Raw logits scaled only by distillation temperature
+        - This prevents double temperature scaling and allows independent control
+        - Model temperature remains learnable via GT loss without interfering with distillation
+        
         Ground truth loss weighting:
         - If use_hybrid_weight_for_gt_loss=False (default): gt_loss = loss_text + loss_classifier
         - If use_hybrid_weight_for_gt_loss=True: gt_loss = hybrid_weight * loss_text + (1 - hybrid_weight) * loss_classifier
@@ -1718,11 +1725,26 @@ class ContinualTrainer:
             # Fallback to regular loss if not in hybrid mode
             return self._compute_regular_loss(inputs, targets)
         
-        # Forward pass to get both logits separately
-        text_logits, learned_logits = model_to_use.classifier(
+        # Forward pass to get both raw unscaled logits separately
+        text_logits_raw, learned_logits_raw = model_to_use.classifier(
             model_to_use.backbone(inputs), 
             return_separate_logits=True
         )
+        
+        # Apply model temperature and logit_bias for ground truth loss
+        # This matches what the model does for final predictions
+        # Get temperature value using same logic as model
+        if model_to_use.classifier.use_log_temperature:
+            temperature = torch.exp(model_to_use.classifier.log_temperature)
+        else:
+            temperature = model_to_use.classifier.temperature
+        
+        text_logits = text_logits_raw * temperature
+        learned_logits = learned_logits_raw * temperature
+        
+        # Add logit_bias to text logits if present (after temperature scaling)
+        if hasattr(model_to_use.classifier, 'logit_bias') and model_to_use.classifier.logit_bias is not None:
+            text_logits = text_logits + model_to_use.classifier.logit_bias
         
         # Apply logit masking to both for loss computation
         text_logits_masked = self._apply_logit_masking(text_logits, targets)
@@ -1746,10 +1768,17 @@ class ContinualTrainer:
             gt_loss = loss_text + loss_classifier
         
         # Compute ratio-based weights for distillation
-        # When classifier is better (smaller loss), use it to teach text
-        # ratio_c2t = (loss_text - loss_classifier) / (loss_classifier + eps)
-        # When text is better, use it to teach classifier
-        # ratio_t2c = (loss_classifier - loss_text) / (loss_text + eps)
+        # Ratios measure relative performance: positive when text is worse, negative when text is better
+        # 
+        # Symmetric normalization (default):
+        #   ratio_c2t = (loss_text - loss_classifier) / (loss_text + loss_classifier)
+        #   ratio_t2c = (loss_classifier - loss_text) / (loss_text + loss_classifier)
+        #   Range: [-1, 1], symmetric, ratio_t2c = -ratio_c2t
+        #
+        # Asymmetric normalization:
+        #   ratio_c2t = (loss_text - loss_classifier) / (loss_classifier + eps)
+        #   ratio_t2c = (loss_classifier - loss_text) / (loss_text + eps)
+        #   Range: unbounded, asymmetric magnitudes
         
         eps = self.distillation_epsilon
         
@@ -1788,21 +1817,22 @@ class ContinualTrainer:
             weight_c2t = torch.sigmoid(ratio_c2t)
             weight_t2c = torch.sigmoid(ratio_t2c)
         
-        # Compute distillation targets (soft labels with temperature)
+        # Compute distillation targets using RAW UNSCALED logits
+        # This allows distillation temperature to be applied independently
         # IMPORTANT: Only compute KL on current task classes to avoid -inf from masking
         T = self.distillation_temperature
         
-        # Extract current task class logits for KL divergence
+        # Extract current task class logits for KL divergence (use raw logits!)
         if self.mask_logits and self.current_task_classes is not None:
             # Only compute KL on current task classes (excluding masked -inf logits)
-            text_logits_current = text_logits[:, self.current_task_classes]
-            learned_logits_current = learned_logits[:, self.current_task_classes]
+            text_logits_current = text_logits_raw[:, self.current_task_classes]
+            learned_logits_current = learned_logits_raw[:, self.current_task_classes]
         else:
             # No masking, use all classes
-            text_logits_current = text_logits
-            learned_logits_current = learned_logits
+            text_logits_current = text_logits_raw
+            learned_logits_current = learned_logits_raw
         
-        distill_loss = torch.tensor(0.0, device=text_logits.device)
+        distill_loss = torch.tensor(0.0, device=text_logits_raw.device)
         
         if self.distillation_use_logits_mixing:
             # LOGITS MIXING APPROACH: Blend logits before softmax to create interpolated targets
