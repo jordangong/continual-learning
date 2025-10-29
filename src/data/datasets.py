@@ -238,14 +238,40 @@ class ContinualDataset:
             
             # Try to access targets directly without loading images for speed
             targets_list = None
-            if hasattr(dataset, "targets"):
-                # Many torchvision datasets have a targets attribute
-                targets_list = dataset.targets
+            
+            # Handle Subset wrapper (common in continual learning datasets)
+            dataset_to_check = dataset
+            subset_indices = None
+            if hasattr(dataset, "dataset") and hasattr(dataset, "indices"):
+                # This is a Subset - access underlying dataset
+                dataset_to_check = dataset.dataset
+                subset_indices = dataset.indices
+                print("Detected Subset wrapper, accessing underlying dataset")
+            
+            if hasattr(dataset_to_check, "targets"):
+                # Many torchvision datasets have a targets attribute (CIFAR, MNIST, etc.)
+                targets_list = dataset_to_check.targets
+                if subset_indices is not None:
+                    targets_list = [targets_list[i] for i in subset_indices]
                 print("Using dataset.targets for fast indexing")
-            elif hasattr(dataset, "samples"):
+            elif hasattr(dataset_to_check, "samples"):
                 # ImageFolder datasets have samples as (path, target) tuples
-                targets_list = [s[1] for s in dataset.samples]
+                targets_list = [s[1] for s in dataset_to_check.samples]
+                if subset_indices is not None:
+                    targets_list = [targets_list[i] for i in subset_indices]
                 print("Using dataset.samples for fast indexing")
+            elif hasattr(dataset_to_check, "_samples"):
+                # Stanford Cars uses _samples (private attribute)
+                targets_list = [s[1] for s in dataset_to_check._samples]
+                if subset_indices is not None:
+                    targets_list = [targets_list[i] for i in subset_indices]
+                print("Using dataset._samples for fast indexing")
+            elif hasattr(dataset_to_check, "_labels"):
+                # FGVC Aircraft, Food101, Oxford Pet use _labels (private attribute)
+                targets_list = dataset_to_check._labels
+                if subset_indices is not None:
+                    targets_list = [targets_list[i] for i in subset_indices]
+                print("Using dataset._labels for fast indexing")
             else:
                 print("No fast target access found, will load dataset items (slower)")
 
