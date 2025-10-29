@@ -97,6 +97,8 @@ class ContinualTrainer:
         self.distillation_use_logits_mixing = self.distillation_config.get("use_logits_mixing", False)
         self.distillation_use_hybrid_weight_for_gt_loss = self.distillation_config.get("use_hybrid_weight_for_gt_loss", False)
         self.distillation_use_symmetric_ratio_normalization = self.distillation_config.get("use_symmetric_ratio_normalization", True)
+        self.distillation_gt_text_loss_weight = self.distillation_config.get("gt_text_loss_weight", 1.0)
+        self.distillation_gt_classifier_loss_weight = self.distillation_config.get("gt_classifier_loss_weight", 1.0)
         self.distillation_gt_loss_weight = self.distillation_config.get("gt_loss_weight", 1.0)
         self.distillation_distill_loss_weight = self.distillation_config.get("distill_loss_weight", 0.5)
         self.distillation_temperature = self.distillation_config.get("temperature", 2.0)
@@ -1696,9 +1698,17 @@ class ContinualTrainer:
         - Model temperature remains learnable via GT loss without interfering with distillation
         
         Ground truth loss weighting:
-        - If use_hybrid_weight_for_gt_loss=False (default): gt_loss = loss_text + loss_classifier
-        - If use_hybrid_weight_for_gt_loss=True: gt_loss = hybrid_weight * loss_text + (1 - hybrid_weight) * loss_classifier
-          This aligns training objective with inference behavior.
+        - If use_hybrid_weight_for_gt_loss=False (default):
+          gt_loss = gt_text_loss_weight * loss_text + gt_classifier_loss_weight * loss_classifier
+          distill_loss also weighted: gt_text_loss_weight controls text's distillation gradient
+                                       gt_classifier_loss_weight controls learned's distillation gradient
+          Configurable weights allow asymmetric training (e.g., prioritize one classifier)
+          Default weights (1.0, 1.0): Equal weighting, both classifiers trained equally
+          Example (0.0, 1.0): Only learned classifier receives ANY gradients (GT + distillation)
+        - If use_hybrid_weight_for_gt_loss=True: 
+          gt_loss = hybrid_weight * loss_text + (1 - hybrid_weight) * loss_classifier
+          This aligns training objective with inference behavior (hybrid_weight)
+          Distillation weights NOT applied in this mode
         
         Ratio normalization:
         - If use_symmetric_ratio_normalization=True (default): ratio = (loss_A - loss_B) / (loss_A + loss_B)
@@ -1764,8 +1774,14 @@ class ContinualTrainer:
             hybrid_weight = model_to_use.classifier.hybrid_weight
             gt_loss = hybrid_weight * loss_text + (1 - hybrid_weight) * loss_classifier
         else:
-            # Equal weighting (default): both classifiers trained equally strong
-            gt_loss = loss_text + loss_classifier
+            # Weight by configurable weights (for asymmetric training objectives)
+            # Default (1.0, 1.0): Equal weighting, both classifiers trained equally strong
+            # Asymmetric (e.g., 0.0, 1.0): Only train learned classifier via GT loss
+            # Asymmetric (e.g., 1.0, 0.0): Only train text classifier via GT loss
+            gt_loss = (
+                self.distillation_gt_text_loss_weight * loss_text + 
+                self.distillation_gt_classifier_loss_weight * loss_classifier
+            )
         
         # Compute ratio-based weights for distillation
         # Ratios measure relative performance: positive when text is worse, negative when text is better
@@ -1859,7 +1875,8 @@ class ContinualTrainer:
                     log_target=True
                 ) * (T ** 2)
                 
-                distill_loss = distill_loss + distill_l2t
+                # Weight by gt_text_loss_weight (text is student, controls its gradient flow)
+                distill_loss = distill_loss + self.distillation_gt_text_loss_weight * distill_l2t
             
             # Text -> Learned: classifier learns from mixed target
             if self.distillation_direction in ["bidirectional", "text_to_learned"]:
@@ -1881,7 +1898,8 @@ class ContinualTrainer:
                     log_target=True
                 ) * (T ** 2)
                 
-                distill_loss = distill_loss + distill_t2l
+                # Weight by gt_classifier_loss_weight (learned is student, controls its gradient flow)
+                distill_loss = distill_loss + self.distillation_gt_classifier_loss_weight * distill_t2l
         
         else:
             # WEIGHTED LOSS APPROACH: Compute KL to pure teacher targets, then weight the loss
@@ -1905,7 +1923,8 @@ class ContinualTrainer:
                 
                 # Apply ratio-based weights and average over batch
                 weighted_distill_l2t = (weight_c2t * distill_l2t).mean()
-                distill_loss = distill_loss + weighted_distill_l2t
+                # Weight by gt_text_loss_weight (text is student, controls its gradient flow)
+                distill_loss = distill_loss + self.distillation_gt_text_loss_weight * weighted_distill_l2t
             
             # Text -> Learned: classifier learns from text (text is teacher)
             if self.distillation_direction in ["bidirectional", "text_to_learned"]:
@@ -1919,7 +1938,8 @@ class ContinualTrainer:
                 
                 # Apply ratio-based weights and average over batch
                 weighted_distill_t2l = (weight_t2c * distill_t2l).mean()
-                distill_loss = distill_loss + weighted_distill_t2l
+                # Weight by gt_classifier_loss_weight (learned is student, controls its gradient flow)
+                distill_loss = distill_loss + self.distillation_gt_classifier_loss_weight * weighted_distill_t2l
         
         # Combine ground truth loss and distillation loss
         total_loss = (

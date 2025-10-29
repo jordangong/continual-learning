@@ -72,7 +72,9 @@ continual:
     use_logits_mixing: false   # Use logits mixing (blend targets) vs weighted loss (weight KL)
     use_hybrid_weight_for_gt_loss: false  # Weight gt losses by hybrid_weight (align training with inference)
     use_symmetric_ratio_normalization: true  # Symmetric ratio normalization (sum) vs asymmetric (per-loss)
-    gt_loss_weight: 1.0        # Weight for ground truth supervision loss
+    gt_text_loss_weight: 1.0   # Weight for text classifier ground truth loss (for asymmetric training)
+    gt_classifier_loss_weight: 1.0  # Weight for learned classifier ground truth loss (for asymmetric training)
+    gt_loss_weight: 1.0        # Weight for combined ground truth supervision loss
     distill_loss_weight: 0.5   # Weight for distillation loss
     temperature: 2.0           # Temperature for distillation (higher = softer targets)
     loss_ratio_clip: 5.0       # Clip loss ratio to avoid extreme values
