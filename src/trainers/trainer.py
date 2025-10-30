@@ -847,7 +847,14 @@ class ContinualTrainer:
 
         train_iter = tqdm(train_loader, desc=desc) if should_show_pbar else train_loader
 
-        for inputs, targets in train_iter:
+        for batch in train_iter:
+            # Handle both 2-tuple (image, label) and 3-tuple (image, label, caption)
+            if len(batch) == 3:
+                inputs, targets, captions = batch
+            else:
+                inputs, targets = batch
+                captions = None
+            
             inputs, targets = inputs.to(self.device), targets.to(self.device)
 
             # Zero gradients
@@ -866,14 +873,14 @@ class ContinualTrainer:
                         
                         # Add pretraining loss if configured (distillation + pretraining)
                         if self.use_pretraining_loss:
-                            pretraining_loss = self._compute_pretraining_loss(inputs, targets)
+                            pretraining_loss = self._compute_pretraining_loss(inputs, targets, captions)
                             loss = loss + self.pretraining_loss_weight * pretraining_loss
                     elif self.use_pretraining_loss and self.use_regular_loss:
                         # Combined: pretraining + regular loss
-                        loss, outputs = self._compute_combined_loss(inputs, targets)
+                        loss, outputs = self._compute_combined_loss(inputs, targets, captions)
                     elif self.use_pretraining_loss:
                         # Pure pretraining loss (CLIP/SigLIP contrastive)
-                        loss = self._compute_pretraining_loss(inputs, targets)
+                        loss = self._compute_pretraining_loss(inputs, targets, captions)
                         outputs = None
                     else:
                         # Standard cross-entropy loss
@@ -1120,7 +1127,12 @@ class ContinualTrainer:
             test_iter = (
                 tqdm(test_loader, desc=desc) if should_show_pbar else test_loader
             )
-            for inputs, targets in test_iter:
+            for batch in test_iter:
+                # Handle both 2-tuple and 3-tuple batches (with captions)
+                if len(batch) == 3:
+                    inputs, targets, _ = batch  # Ignore captions in evaluation
+                else:
+                    inputs, targets = batch
                 inputs, targets = inputs.to(self.device), targets.to(self.device)
 
                 # Use mixed precision for evaluation if enabled
@@ -1424,7 +1436,12 @@ class ContinualTrainer:
 
         data_iter = tqdm(train_loader, desc=desc) if should_show_pbar else train_loader
 
-        for inputs, targets in data_iter:
+        for batch in data_iter:
+            # Handle both 2-tuple and 3-tuple batches (with captions)
+            if len(batch) == 3:
+                inputs, targets, _ = batch  # Ignore captions for EWC
+            else:
+                inputs, targets = batch
             inputs, targets = inputs.to(self.device), targets.to(self.device)
 
             self.optimizer.zero_grad()
@@ -1584,12 +1601,14 @@ class ContinualTrainer:
         self,
         inputs: torch.Tensor,
         targets: torch.Tensor,
+        captions: Optional[List[str]] = None,
     ) -> torch.Tensor:
         """Compute CLIP/SigLIP pretraining contrastive loss.
 
         Args:
             inputs: Input images [batch_size, C, H, W]
             targets: Target class labels [batch_size]
+            captions: Optional list of caption strings [batch_size]
 
         Returns:
             Pretraining loss scalar
@@ -1597,7 +1616,7 @@ class ContinualTrainer:
         # Get image and text features
         model_to_use = self.model.module if hasattr(self.model, "module") else self.model
         image_features, text_features = model_to_use.forward_for_pretraining_loss(
-            inputs, targets
+            inputs, targets, captions
         )
 
         # Get pretraining temperature from model (separate from regular temperature)
@@ -1648,6 +1667,7 @@ class ContinualTrainer:
         self,
         inputs: torch.Tensor,
         targets: torch.Tensor,
+        captions: Optional[List[str]] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """Compute combined loss (pretraining loss + regular loss).
 
@@ -1656,12 +1676,13 @@ class ContinualTrainer:
         Args:
             inputs: Input images [batch_size, C, H, W]
             targets: Target class labels [batch_size]
+            captions: Optional list of caption strings [batch_size]
 
         Returns:
             Tuple of (total_loss, outputs)
         """
         # Compute pretraining loss
-        pretraining_loss = self._compute_pretraining_loss(inputs, targets)
+        pretraining_loss = self._compute_pretraining_loss(inputs, targets, captions)
 
         # Compute regular cross-entropy loss
         regular_loss, outputs = self._compute_regular_loss(inputs, targets)
@@ -2676,7 +2697,12 @@ class ContinualTrainer:
             data_iter = tqdm(temp_loader, desc="Extracting features for prototypes")
 
             with torch.no_grad():
-                for inputs, targets in data_iter:
+                for batch in data_iter:
+                    # Handle both 2-tuple and 3-tuple batches (with captions)
+                    if len(batch) == 3:
+                        inputs, targets, _ = batch  # Ignore captions for prototype extraction
+                    else:
+                        inputs, targets = batch
                     inputs = inputs.to(self.device)
                     targets = targets.to(self.device)
 

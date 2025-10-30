@@ -1,5 +1,6 @@
 # Data
 /data/
+/recaptions_*/
 
 # Outputs (includes logs, checkpoints, wandb, and hydra runs)
 outputs/

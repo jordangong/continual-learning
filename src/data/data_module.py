@@ -47,6 +47,7 @@ class DataModule:
         self.dataset_config = config["dataset"]
         self.continual_config = config["continual"]
         self.training_config = config["training"]
+        self.caption_config = config.get("captions", {"enabled": False})
         self.data_dir = config["paths"]["data_dir"]
 
         # Create data directory if it doesn't exist
@@ -464,7 +465,18 @@ class DataModule:
         Returns:
             Tuple of (step_classes, train_loader, test_loader)
         """
-        return self.dataset.get_data_loaders(
+        # Wrap original datasets with captions BEFORE subsetting (if enabled and not already wrapped)
+        if self.caption_config.get("enabled", False) and step == 0:
+            # Only wrap once at step 0 (before any subsetting happens)
+            self.dataset.wrap_with_captions(
+                caption_dir=self.caption_config.get("caption_dir", "./recaptions"),
+                dataset_name=self.dataset_config["name"].lower(),
+                sample_strategy=self.caption_config.get("sample_strategy", "random"),
+                seed=self.config["seed"],
+            )
+        
+        # Get base data loaders from the dataset (subsetting happens here)
+        step_classes, train_loader, test_loader = self.dataset.get_data_loaders(
             step=step,
             batch_size=self.training_config["batch_size"],
             eval_batch_size=self.training_config["eval_batch_size"],
@@ -474,6 +486,8 @@ class DataModule:
             rank=rank,
             world_size=world_size,
         )
+        
+        return step_classes, train_loader, test_loader
 
     def get_memory_samples(self, step: int) -> Optional[torch.utils.data.Dataset]:
         """

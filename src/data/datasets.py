@@ -77,6 +77,51 @@ class ContinualDataset:
         # Set random seed for reproducibility
         np.random.seed(self.seed)
 
+    def wrap_with_captions(
+        self,
+        caption_dir: str,
+        dataset_name: str,
+        sample_strategy: str = "random",
+        seed: int = 42,
+    ):
+        """
+        Wrap the original train and test datasets with captions.
+        MUST be called BEFORE get_data_loaders to ensure caption indices match.
+        
+        Args:
+            caption_dir: Directory containing caption JSON files
+            dataset_name: Name of the dataset (e.g., "cifar100", "imagenet-r")
+            sample_strategy: How to select captions ("random", "first", or "all")
+            seed: Random seed for caption sampling
+        """
+        from src.data.caption_dataset import create_caption_dataset
+        
+        # Wrap train dataset
+        train_caption_dataset = create_caption_dataset(
+            base_dataset=self.dataset_train,
+            caption_dir=caption_dir,
+            dataset_name=dataset_name,
+            split="train",
+            sample_strategy=sample_strategy,
+            seed=seed,
+        )
+        if train_caption_dataset is not None:
+            self.dataset_train = train_caption_dataset
+            print("Wrapped train dataset with captions BEFORE subsetting")
+        
+        # Wrap test dataset
+        test_caption_dataset = create_caption_dataset(
+            base_dataset=self.dataset_test,
+            caption_dir=caption_dir,
+            dataset_name=dataset_name,
+            split="test",
+            sample_strategy=sample_strategy,
+            seed=seed,
+        )
+        if test_caption_dataset is not None:
+            self.dataset_test = test_caption_dataset
+            print("Wrapped test dataset with captions BEFORE subsetting")
+    
     def setup(self):
         """Setup the dataset. Should be implemented by child classes."""
         raise NotImplementedError

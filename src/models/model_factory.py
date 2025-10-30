@@ -286,6 +286,35 @@ class CLIPClassifier(nn.Module):
 
         self.text_embeddings_initialized = True
 
+    def _encode_captions(self, captions: List[str]) -> torch.Tensor:
+        """Encode caption strings to text embeddings.
+
+        Args:
+            captions: List of caption strings [batch_size]
+
+        Returns:
+            Text embeddings tensor [batch_size, feature_dim]
+        """
+        if not captions:
+            return torch.empty(0, self.feature_dim, device=self.device)
+
+        # Tokenize captions
+        text_tokens = self.tokenizer(captions)
+        text_tokens = text_tokens.to(self.device)
+
+        # Extract text features
+        text_features = self.text_encoder(text_tokens)
+        
+        # Apply text projection if available (for projection tuning)
+        if self.text_projection is not None:
+            text_features = self.text_projection(text_features)
+
+        # Normalize (required for contrastive learning)
+        if self.normalize:
+            text_features = F.normalize(text_features, p=2, dim=-1)
+
+        return text_features
+
     def _encode_class_names(self, class_names: List[str]) -> torch.Tensor:
         """Encode multiple class names to text embeddings in a single batch.
 
@@ -538,16 +567,21 @@ class CLIPClassifier(nn.Module):
             raise ValueError(f"Unsupported mode: {self.mode}")
 
     def forward_for_pretraining_loss(
-        self, image_features: torch.Tensor, targets: torch.Tensor
+        self, 
+        image_features: torch.Tensor, 
+        targets: torch.Tensor,
+        captions: Optional[List[str]] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """Forward pass for pretraining loss computation (CLIP/SigLIP contrastive loss).
 
-        This method returns normalized image features and text features for the target classes,
-        which can be used to compute CLIP-style contrastive loss within the batch.
+        This method returns normalized image features and text features.
+        If captions are provided, encodes them as text features.
+        Otherwise, uses class name embeddings for the target classes.
 
         Args:
             image_features: Image features [batch_size, feature_dim]
             targets: Target class labels [batch_size]
+            captions: Optional list of caption strings [batch_size]
 
         Returns:
             Tuple of (normalized_image_features, normalized_text_features)
@@ -559,24 +593,30 @@ class CLIPClassifier(nn.Module):
                 f"Pretraining loss only supported for mode='text' or 'hybrid', got mode='{self.mode}'."
             )
 
-        if not self.text_embeddings_initialized:
-            raise RuntimeError(
-                "Text embeddings not initialized. Call set_class_names() first."
-            )
-
-        # Get text embeddings (recompute if text encoder is trainable)
-        if self.freeze_text_encoder:
-            all_text_embeddings = self.text_embeddings
+        # Get text features either from captions or class names
+        if captions is not None:
+            # Encode caption text directly
+            text_features = self._encode_captions(captions)
         else:
-            all_text_embeddings = self._compute_text_embeddings()
+            # Use class name embeddings (original behavior)
+            if not self.text_embeddings_initialized:
+                raise RuntimeError(
+                    "Text embeddings not initialized. Call set_class_names() first."
+                )
 
-        # Extract text embeddings for the target classes
-        # targets: [batch_size], text_features: [batch_size, feature_dim]
-        text_features = all_text_embeddings[targets]
+            # Get text embeddings (recompute if text encoder is trainable)
+            if self.freeze_text_encoder:
+                all_text_embeddings = self.text_embeddings
+            else:
+                all_text_embeddings = self._compute_text_embeddings()
+
+            # Extract text embeddings for the target classes
+            # targets: [batch_size], text_features: [batch_size, feature_dim]
+            text_features = all_text_embeddings[targets]
 
         # Normalize both image and text features (required for contrastive loss)
         image_features_norm = F.normalize(image_features, p=2, dim=1)
-        text_features_norm = F.normalize(text_features, p=2, dim=1)
+        text_features_norm = text_features  # Text features already normalized
 
         return image_features_norm, text_features_norm
 
@@ -1282,7 +1322,7 @@ class PretrainedModel(nn.Module):
         return self.backbone(x)
 
     def forward_for_pretraining_loss(
-        self, x: torch.Tensor, targets: torch.Tensor
+        self, x: torch.Tensor, targets: torch.Tensor, captions: Optional[List[str]] = None
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """Forward pass for pretraining loss computation.
 
@@ -1292,6 +1332,7 @@ class PretrainedModel(nn.Module):
         Args:
             x: Input images [batch_size, C, H, W]
             targets: Target class labels [batch_size]
+            captions: Optional list of caption strings [batch_size]
 
         Returns:
             Tuple of (normalized_image_features, normalized_text_features)
@@ -1305,7 +1346,7 @@ class PretrainedModel(nn.Module):
         image_features = self.backbone(x)
 
         # Get text features using the classifier
-        return self.classifier.forward_for_pretraining_loss(image_features, targets)
+        return self.classifier.forward_for_pretraining_loss(image_features, targets, captions)
 
     def set_class_names(
         self, class_names: List[str], class_indices: Optional[List[int]] = None
@@ -1362,7 +1403,12 @@ class PretrainedModel(nn.Module):
         with torch.no_grad():
             # Add progress bar with tqdm
             data_iter = tqdm(data_loader, desc="Extracting features for prototypes")
-            for inputs, targets in data_iter:
+            for batch in data_iter:
+                # Handle both 2-tuple and 3-tuple batches (with captions)
+                if len(batch) == 3:
+                    inputs, targets, _ = batch  # Ignore captions for prototype computation
+                else:
+                    inputs, targets = batch
                 inputs = inputs.to(self.device)
                 targets = targets.to(self.device)
                 features = self.backbone(inputs)

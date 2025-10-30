@@ -608,7 +608,7 @@ class ProjectionWrapper(nn.Module):
         return list(self.projection.parameters())
     
     def forward_for_pretraining_loss(
-        self, x: torch.Tensor, targets: torch.Tensor
+        self, x: torch.Tensor, targets: torch.Tensor, captions=None
     ):
         """
         Forward pass for pretraining loss computation with projection.
@@ -619,6 +619,7 @@ class ProjectionWrapper(nn.Module):
         Args:
             x: Input images [batch_size, C, H, W]
             targets: Target class labels [batch_size]
+            captions: Optional list of caption strings [batch_size]
             
         Returns:
             Tuple of (normalized_image_features, normalized_text_features)
@@ -630,7 +631,7 @@ class ProjectionWrapper(nn.Module):
         projected_features = self.projection(image_features)
         
         # Pass projected features to classifier's forward_for_pretraining_loss
-        return self.classifier.forward_for_pretraining_loss(projected_features, targets)
+        return self.classifier.forward_for_pretraining_loss(projected_features, targets, captions)
     
     def __getattr__(self, name: str):
         """Forward attribute access to base module for compatibility."""

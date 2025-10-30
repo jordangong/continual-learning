@@ -179,6 +179,17 @@ training:
     eval: true                 # Enable mixed precision during evaluation
 
 # ======================================================
+# DATA AUGMENTATION AND CAPTIONS
+# ======================================================
+# Recaptioned data configuration
+captions:
+  enabled: false               # Enable loading recaptioned data for pretraining loss
+  caption_dir: "${hydra:runtime.cwd}/recaptions"  # Directory containing caption JSON files
+  sample_strategy: "first"    # Caption sampling: "random", "first", or "all"
+  # Note: When enabled, captions are used in _compute_pretraining_loss() for CLIP-style contrastive learning
+  # Regular CE loss (_compute_regular_loss) still uses class labels from dataset
+
+# ======================================================
 # OUTPUT AND LOGGING
 # ======================================================
 # Logging configuration

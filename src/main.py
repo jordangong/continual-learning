@@ -286,7 +286,12 @@ def run_training(
 
                 data_iter = tqdm(temp_loader, desc="Extracting features for prototypes")
                 with torch.no_grad():
-                    for inputs, targets in data_iter:
+                    for batch in data_iter:
+                        # Handle both 2-tuple and 3-tuple batches (with captions)
+                        if len(batch) == 3:
+                            inputs, targets, _ = batch  # Ignore captions for prototype extraction
+                        else:
+                            inputs, targets = batch
                         inputs = inputs.to(device)
                         targets = targets.to(device)
 
