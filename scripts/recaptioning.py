@@ -188,9 +188,10 @@ def generate_captions(
     Returns:
         List of generated captions
     """
-    # Keep track of whether we need to resize the image
+    # Keep track of image processing state
     current_image = image
     image_resized = False
+    tried_jpeg = False
     
     # Encode image to base64
     image_base64 = encode_image_to_base64(current_image, format="PNG")
@@ -233,17 +234,29 @@ def generate_captions(
             error_msg = str(e)
             
             # Check if the error is due to image being too large
-            if "Decompressed data too large" in error_msg and not image_resized:
-                print("  Image too large, resizing and retrying...")
-                # Resize image to smaller dimensions (max 512x512)
-                max_size = 512
-                current_image = image.copy()
-                current_image.thumbnail((max_size, max_size), Image.Resampling.LANCZOS)
-                # Re-encode the resized image
-                image_base64 = encode_image_to_base64(current_image, format="PNG")
-                image_resized = True
-                # Retry immediately with resized image
-                continue
+            if "Decompressed data too large" in error_msg:
+                if not image_resized:
+                    # First fallback: Resize to PNG
+                    print("  Image too large, resizing to 512x512 PNG...")
+                    max_size = 512
+                    current_image = image.copy()
+                    current_image.thumbnail((max_size, max_size), Image.Resampling.LANCZOS)
+                    # Re-encode the resized image as PNG
+                    image_base64 = encode_image_to_base64(current_image, format="PNG")
+                    image_resized = True
+                    # Retry immediately with resized PNG
+                    continue
+                elif not tried_jpeg:
+                    # Second fallback: Convert to JPEG for smaller file size
+                    print("  Resized PNG still too large, converting to JPEG...")
+                    # Convert to RGB if necessary (JPEG doesn't support RGBA)
+                    if current_image.mode in ("RGBA", "P", "LA"):
+                        current_image = current_image.convert("RGB")
+                    # Re-encode as JPEG (much smaller file size)
+                    image_base64 = encode_image_to_base64(current_image, format="JPEG")
+                    tried_jpeg = True
+                    # Retry immediately with JPEG
+                    continue
             
             if attempt < max_retries - 1:
                 print(f"  Error on attempt {attempt + 1}: {e}. Retrying...")
