@@ -188,8 +188,12 @@ def generate_captions(
     Returns:
         List of generated captions
     """
+    # Keep track of whether we need to resize the image
+    current_image = image
+    image_resized = False
+    
     # Encode image to base64
-    image_base64 = encode_image_to_base64(image, format="PNG")
+    image_base64 = encode_image_to_base64(current_image, format="PNG")
     
     # Create system and user prompts
     system_prompt = create_system_prompt(num_captions, coco_examples)
@@ -226,12 +230,27 @@ def generate_captions(
             return captions_obj.captions
             
         except Exception as e:
+            error_msg = str(e)
+            
+            # Check if the error is due to image being too large
+            if "Decompressed data too large" in error_msg and not image_resized:
+                print("  Image too large, resizing and retrying...")
+                # Resize image to smaller dimensions (max 512x512)
+                max_size = 512
+                current_image = image.copy()
+                current_image.thumbnail((max_size, max_size), Image.Resampling.LANCZOS)
+                # Re-encode the resized image
+                image_base64 = encode_image_to_base64(current_image, format="PNG")
+                image_resized = True
+                # Retry immediately with resized image
+                continue
+            
             if attempt < max_retries - 1:
                 print(f"  Error on attempt {attempt + 1}: {e}. Retrying...")
                 continue
             else:
                 print(f"  Failed after {max_retries} attempts: {e}")
-                # Return empty list on failure
+                # Return empty list on failure (keeps original caption unchanged)
                 return []
     
     return []
