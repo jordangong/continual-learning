@@ -93,6 +93,11 @@ class CaptionDataset(Dataset):
     # Forward dataset attributes for compatibility
     def __getattr__(self, name: str):
         """Forward attribute access to base dataset."""
+        # Block __getitems__ from being forwarded to prevent DataLoader from bypassing
+        # our __getitem__ method. DataLoader will fall back to calling __getitem__ instead.
+        if name == '__getitems__':
+            raise AttributeError(f"'{type(self).__name__}' object has no attribute '{name}'")
+        
         # __getattr__ is only called when attribute not found in instance
         # Forward to base_dataset (avoid infinite recursion by checking __dict__)
         if 'base_dataset' in self.__dict__:
