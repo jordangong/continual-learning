@@ -203,6 +203,9 @@ def generate_captions(
     # Retry loop for API calls
     for attempt in range(max_retries):
         try:
+            # Vary seed across attempts to get different results if LLM doesn't follow instructions
+            current_seed = 42 + attempt
+            
             # Call OpenAI API with structured outputs
             completion = client.chat.completions.parse(
                 model=model,
@@ -223,12 +226,22 @@ def generate_captions(
                 ],
                 response_format=ImageCaptions,
                 temperature=temperature,
-                seed=42,  # Set seed for LLM inference
+                seed=current_seed,  # Vary seed across attempts
             )
             
             # Extract captions from structured response
             captions_obj = completion.choices[0].message.parsed
-            return captions_obj.captions
+            captions = captions_obj.captions
+            
+            # Validate that we got the correct number of captions
+            if len(captions) != num_captions:
+                if attempt < max_retries - 1:
+                    print(f"  Got {len(captions)}/{num_captions} captions, retrying with different seed (seed={42 + attempt + 1})...")
+                    continue
+                else:
+                    print(f"  Warning: Got {len(captions)}/{num_captions} captions after {max_retries} attempts")
+            
+            return captions
             
         except Exception as e:
             error_msg = str(e)
@@ -645,11 +658,17 @@ def main():
             class_captions = {}
             progress_desc = f"Class {class_enum_idx}/{len(selected_classes)}: {class_name}"
             for img_idx in tqdm(sampled_indices, desc=progress_desc, unit="img"):
-                # Skip if already processed
+                # Skip if already processed with correct number of captions
                 img_key = f"{class_idx}_{img_idx}"
                 if img_key in all_captions:
-                    total_images_skipped += 1
-                    continue
+                    existing_captions = all_captions[img_key]["captions"]
+                    # Only skip if we have the expected number of captions
+                    # Reprocess if empty or incomplete (e.g., from API errors/context limits)
+                    if len(existing_captions) == args.num_captions:
+                        total_images_skipped += 1
+                        continue
+                    else:
+                        print(f"  Reprocessing {img_key}: has {len(existing_captions)}/{args.num_captions} captions")
                 
                 # Load image (should be PIL Image with transform=None)
                 image, label = data[img_idx]
