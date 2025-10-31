@@ -315,11 +315,13 @@ class CLIPClassifier(nn.Module):
 
         return text_features
 
-    def _encode_class_names(self, class_names: List[str]) -> torch.Tensor:
-        """Encode multiple class names to text embeddings in a single batch.
+    def _encode_class_names(self, class_names: List[str], batch_size: int = 64) -> torch.Tensor:
+        """Encode multiple class names to text embeddings with batching to avoid OOM.
 
         Args:
             class_names: List of class names to encode
+            batch_size: Maximum number of prompts to process in one batch (default: 64)
+                       This limits memory usage when encoding many classes (e.g., 200 classes × 2 templates = 400 prompts)
 
         Returns:
             Text embeddings tensor [num_classes, feature_dim]
@@ -337,20 +339,35 @@ class CLIPClassifier(nn.Module):
             prompts = [template.format(class_name) for template in self.text_templates]
             all_prompts.extend(prompts)
 
-        # Tokenize all prompts in one batch
-        text_tokens = self.tokenizer(all_prompts)
-        text_tokens = text_tokens.to(self.device)
-
-        # Extract text features in one forward pass
-        all_text_features = self.text_encoder(text_tokens)
+        # Process prompts in batches to avoid OOM
+        # When we have many classes (e.g., step 9 with 200 classes × 2 templates = 400 prompts),
+        # processing all at once can cause OOM in text encoder's attention
+        all_text_features_list = []
+        num_prompts = len(all_prompts)
         
-        # Apply text projection if available (for projection tuning)
-        if self.text_projection is not None:
-            all_text_features = self.text_projection(all_text_features)
-
-        # Normalize if specified
-        if self.normalize:
-            all_text_features = F.normalize(all_text_features, p=2, dim=-1)
+        for start_idx in range(0, num_prompts, batch_size):
+            end_idx = min(start_idx + batch_size, num_prompts)
+            batch_prompts = all_prompts[start_idx:end_idx]
+            
+            # Tokenize batch
+            text_tokens = self.tokenizer(batch_prompts)
+            text_tokens = text_tokens.to(self.device)
+            
+            # Extract text features for this batch
+            batch_text_features = self.text_encoder(text_tokens)
+            
+            # Apply text projection if available (for projection tuning)
+            if self.text_projection is not None:
+                batch_text_features = self.text_projection(batch_text_features)
+            
+            # Normalize if specified
+            if self.normalize:
+                batch_text_features = F.normalize(batch_text_features, p=2, dim=-1)
+            
+            all_text_features_list.append(batch_text_features)
+        
+        # Concatenate all batches
+        all_text_features = torch.cat(all_text_features_list, dim=0)
 
         # Reshape to [num_classes, num_templates, feature_dim]
         num_templates = len(self.text_templates)
@@ -367,8 +384,12 @@ class CLIPClassifier(nn.Module):
 
         return class_embeddings
 
-    def _compute_text_embeddings(self) -> torch.Tensor:
+    def _compute_text_embeddings(self, batch_size: Optional[int] = None) -> torch.Tensor:
         """Compute text embeddings from class names (used when text encoder is trainable).
+
+        Args:
+            batch_size: Current batch size from forward pass, used to determine text encoding batch size.
+                       If None, uses default batch_size=64 in _encode_class_names.
 
         Returns:
             Text embeddings tensor [num_classes, feature_dim]
@@ -386,8 +407,12 @@ class CLIPClassifier(nn.Module):
                 valid_indices.append(idx)
 
         # Batch encode all valid class names
+        # Use current batch size if available to optimize memory usage
         if valid_class_names:
-            valid_embeddings = self._encode_class_names(valid_class_names)
+            if batch_size is not None:
+                valid_embeddings = self._encode_class_names(valid_class_names, batch_size=batch_size)
+            else:
+                valid_embeddings = self._encode_class_names(valid_class_names)
         else:
             valid_embeddings = torch.empty(0, self.feature_dim, device=self.device)
 
@@ -429,7 +454,7 @@ class CLIPClassifier(nn.Module):
             if self.freeze_text_encoder:
                 text_embeddings = self.text_embeddings
             else:
-                text_embeddings = self._compute_text_embeddings()
+                text_embeddings = self._compute_text_embeddings(batch_size=x.size(0))
 
             # Normalize image features if specified
             if self.normalize:
@@ -461,7 +486,7 @@ class CLIPClassifier(nn.Module):
                 if self.freeze_text_encoder:
                     text_embeddings = self.text_embeddings
                 else:
-                    text_embeddings = self._compute_text_embeddings()
+                    text_embeddings = self._compute_text_embeddings(batch_size=x.size(0))
                 
                 # Normalize image features if specified
                 if self.normalize:
@@ -480,7 +505,7 @@ class CLIPClassifier(nn.Module):
             if self.freeze_text_encoder:
                 text_embeddings = self.text_embeddings
             else:
-                text_embeddings = self._compute_text_embeddings()
+                text_embeddings = self._compute_text_embeddings(batch_size=x.size(0))
 
             # Normalize image features if specified
             if self.normalize:
