@@ -425,13 +425,20 @@ class CLIPClassifier(nn.Module):
 
         return all_embeddings
 
-    def forward(self, x: torch.Tensor, return_separate_logits: bool = False) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
+    def forward(
+        self,
+        x: torch.Tensor,
+        return_separate_logits: bool = False,
+        text_embeddings: Optional[torch.Tensor] = None,
+    ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
         """Forward pass using text embeddings and/or learned classifier.
 
         Args:
             x: Image features [batch_size, feature_dim]
             return_separate_logits: If True and in hybrid mode, return (text_logits, learned_logits) separately
                                     instead of combined logits. Used for competitive distillation.
+            text_embeddings: Optional pre-computed text embeddings [num_classes, feature_dim].
+                           If provided, uses these instead of computing (avoids duplicate encoding).
 
         Returns:
             If return_separate_logits=False or mode='text':
@@ -450,11 +457,12 @@ class CLIPClassifier(nn.Module):
             if not self.text_embeddings_initialized:
                 return torch.zeros(x.size(0), self.num_classes, device=x.device)
 
-            # Get text embeddings (recompute if text encoder is trainable)
-            if self.freeze_text_encoder:
-                text_embeddings = self.text_embeddings
-            else:
-                text_embeddings = self._compute_text_embeddings(batch_size=x.size(0))
+            # Get text embeddings (use pre-computed if provided, otherwise compute)
+            if text_embeddings is None:
+                if self.freeze_text_encoder:
+                    text_embeddings = self.text_embeddings
+                else:
+                    text_embeddings = self._compute_text_embeddings(batch_size=x.size(0))
 
             # Normalize image features if specified
             if self.normalize:
@@ -501,11 +509,12 @@ class CLIPClassifier(nn.Module):
                 
                 return logits
 
-            # Get text embeddings (recompute if text encoder is trainable)
-            if self.freeze_text_encoder:
-                text_embeddings = self.text_embeddings
-            else:
-                text_embeddings = self._compute_text_embeddings(batch_size=x.size(0))
+            # Get text embeddings (use pre-computed if provided, otherwise compute)
+            if text_embeddings is None:
+                if self.freeze_text_encoder:
+                    text_embeddings = self.text_embeddings
+                else:
+                    text_embeddings = self._compute_text_embeddings(batch_size=x.size(0))
 
             # Normalize image features if specified
             if self.normalize:
@@ -596,6 +605,7 @@ class CLIPClassifier(nn.Module):
         image_features: torch.Tensor, 
         targets: torch.Tensor,
         captions: Optional[List[str]] = None,
+        text_embeddings: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """Forward pass for pretraining loss computation (CLIP/SigLIP contrastive loss).
 
@@ -607,6 +617,8 @@ class CLIPClassifier(nn.Module):
             image_features: Image features [batch_size, feature_dim]
             targets: Target class labels [batch_size]
             captions: Optional list of caption strings [batch_size]
+            text_embeddings: Optional pre-computed text embeddings [num_classes, feature_dim].
+                           If provided, uses these instead of computing (avoids duplicate encoding).
 
         Returns:
             Tuple of (normalized_image_features, normalized_text_features)
@@ -629,8 +641,11 @@ class CLIPClassifier(nn.Module):
                     "Text embeddings not initialized. Call set_class_names() first."
                 )
 
-            # Get text embeddings (recompute if text encoder is trainable)
-            if self.freeze_text_encoder:
+            # Get text embeddings (use pre-computed if provided, otherwise compute)
+            if text_embeddings is not None:
+                # Use pre-computed embeddings (avoids duplicate encoding in combined loss)
+                all_text_embeddings = text_embeddings
+            elif self.freeze_text_encoder:
                 all_text_embeddings = self.text_embeddings
             else:
                 all_text_embeddings = self._compute_text_embeddings()

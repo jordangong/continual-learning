@@ -870,15 +870,17 @@ class ContinualTrainer:
                     if self.distillation_enabled:
                         # Competitive distillation loss (hybrid mode)
                         # Request features if pretraining loss is also used to avoid double forward pass
-                        loss, outputs, image_features = self._compute_competitive_distillation_loss(
+                        loss, outputs, image_features, text_embeddings = self._compute_competitive_distillation_loss(
                             inputs, targets, return_features=self.use_pretraining_loss
                         )
                         
                         # Add pretraining loss if configured (distillation + pretraining)
-                        # Use image_features from distillation to avoid duplicate backbone forward pass
+                        # Use image_features and text_embeddings from distillation to avoid duplicate forward passes
                         if self.use_pretraining_loss:
                             pretraining_loss = self._compute_pretraining_loss(
-                                inputs, targets, captions, image_features=image_features
+                                inputs, targets, captions, 
+                                image_features=image_features,
+                                text_embeddings=text_embeddings
                             )
                             loss = loss + self.pretraining_loss_weight * pretraining_loss
                     elif self.use_pretraining_loss and self.use_regular_loss:
@@ -972,15 +974,17 @@ class ContinualTrainer:
                 if self.distillation_enabled:
                     # Competitive distillation loss (hybrid mode)
                     # Request features if pretraining loss is also used to avoid double forward pass
-                    loss, outputs, image_features = self._compute_competitive_distillation_loss(
+                    loss, outputs, image_features, text_embeddings = self._compute_competitive_distillation_loss(
                         inputs, targets, return_features=self.use_pretraining_loss
                     )
                     
                     # Add pretraining loss if configured (distillation + pretraining)
-                    # Use image_features from distillation to avoid duplicate backbone forward pass
+                    # Use image_features and text_embeddings from distillation to avoid duplicate forward passes
                     if self.use_pretraining_loss:
                         pretraining_loss = self._compute_pretraining_loss(
-                            inputs, targets, captions, image_features=image_features
+                            inputs, targets, captions, 
+                            image_features=image_features,
+                            text_embeddings=text_embeddings
                         )
                         loss = loss + self.pretraining_loss_weight * pretraining_loss
                 elif self.use_pretraining_loss and self.use_regular_loss:
@@ -1663,8 +1667,9 @@ class ContinualTrainer:
         targets: torch.Tensor,
         captions: Optional[List[str]] = None,
         image_features: Optional[torch.Tensor] = None,
+        text_embeddings: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        """Compute CLIP/SigLIP pretraining contrastive loss.
+        """Compute pretraining loss (CLIP/SigLIP contrastive loss) with optional pre-computed features.
 
         Args:
             inputs: Input images [batch_size, C, H, W] (ignored if image_features provided)
@@ -1673,6 +1678,8 @@ class ContinualTrainer:
             image_features: Optional pre-computed image features [batch_size, feature_dim].
                            If provided, uses these instead of computing from inputs.
                            This avoids duplicate backbone forward passes when combining losses.
+            text_embeddings: Optional pre-computed text embeddings [num_classes, feature_dim].
+                           If provided, avoids duplicate text encoding when combining losses.
 
         Returns:
             Pretraining loss scalar
@@ -1684,7 +1691,7 @@ class ContinualTrainer:
             # Use pre-computed image features (from distillation or combined loss)
             # Call classifier's forward_for_pretraining_loss which expects features
             image_features, text_features = model_to_use.classifier.forward_for_pretraining_loss(
-                image_features, targets, captions
+                image_features, targets, captions, text_embeddings=text_embeddings
             )
         else:
             # Compute features from scratch (full forward pass)
@@ -1718,9 +1725,9 @@ class ContinualTrainer:
 
         This should only be called when both use_pretraining_loss and use_regular_loss are True.
         
-        IMPORTANT: Uses single forward pass to avoid memory leak. Previous implementation
-        called backbone twice (once in pretraining loss, once in regular loss), causing
-        doubled memory usage and gradual accumulation across steps.
+        IMPORTANT: Uses single forward pass for backbone AND single text encoding.
+        Order: backbone features → text embeddings (all classes) → regular loss → pretraining loss
+        This avoids duplicate backbone forward and duplicate text encoding.
 
         Args:
             inputs: Input images [batch_size, C, H, W]
@@ -1735,13 +1742,20 @@ class ContinualTrainer:
         # Single forward pass through backbone to extract features
         image_features = model_to_use.forward_features(inputs)
         
-        # Compute pretraining loss using extracted features (avoids duplicate forward pass)
+        # Compute text embeddings once for all classes (needed for regular loss)
+        # This is done first because regular loss needs all classes, pretraining only needs batch classes
+        if not model_to_use.classifier.freeze_text_encoder:
+            text_embeddings = model_to_use.classifier._compute_text_embeddings(batch_size=inputs.size(0))
+        else:
+            text_embeddings = None  # Use cached embeddings in forward
+         
+        # Compute pretraining loss using same features and text embeddings (no text encoding)
         pretraining_loss = self._compute_pretraining_loss(
-            inputs, targets, captions, image_features=image_features
+            inputs, targets, captions, image_features=image_features, text_embeddings=text_embeddings
         )
         
-        # Compute regular loss using same features (no additional backbone forward pass)
-        outputs = model_to_use.classifier(image_features)
+        # Compute regular loss using features and text embeddings (no text encoding)
+        outputs = model_to_use.classifier(image_features, text_embeddings=text_embeddings)
         outputs = self._apply_logit_masking(outputs, targets)
         regular_loss = self.criterion(outputs, targets)
 
@@ -1758,7 +1772,7 @@ class ContinualTrainer:
         inputs: torch.Tensor,
         targets: torch.Tensor,
         return_features: bool = False,
-    ) -> Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
+    ) -> Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor]]:
         """Compute competitive distillation loss with ratio-based soft switching.
         
         The method computes separate losses for text and learned classifier logits,
@@ -1801,10 +1815,10 @@ class ContinualTrainer:
         Args:
             inputs: Input images [batch_size, C, H, W]
             targets: Target class labels [batch_size]
-            return_features: If True, also return image features to avoid duplicate forward pass
+            return_features: If True, also return image features and text embeddings to avoid duplicate forward passes
         
         Returns:
-            Tuple of (total_loss, combined_outputs for accuracy computation, image_features if return_features=True else None)
+            Tuple of (total_loss, combined_outputs, image_features if return_features else None, text_embeddings if return_features else None)
         """
         # Get model reference
         model_to_use = self.model.module if hasattr(self.model, "module") else self.model
@@ -1815,14 +1829,24 @@ class ContinualTrainer:
                 model_to_use.classifier.mode == "hybrid"):
             # Fallback to regular loss if not in hybrid mode
             loss, outputs = self._compute_regular_loss(inputs, targets)
-            return loss, outputs, None
+            return loss, outputs, None, None
         
         # Forward pass to get both raw unscaled logits separately
         # Save image features to avoid duplicate forward pass if needed for pretraining loss
         image_features = model_to_use.forward_features(inputs)
+        
+        # Compute text embeddings once (needed for logit computation)
+        # This avoids duplicate encoding if pretraining loss is also used
+        if not model_to_use.classifier.freeze_text_encoder:
+            text_embeddings = model_to_use.classifier._compute_text_embeddings(batch_size=inputs.size(0))
+        else:
+            text_embeddings = None  # Use cached embeddings in forward
+        
+        # Get separate logits using pre-computed text embeddings (no text encoding)
         text_logits_raw, learned_logits_raw = model_to_use.classifier(
-            image_features, 
-            return_separate_logits=True
+            image_features,
+            return_separate_logits=True,
+            text_embeddings=text_embeddings
         )
         
         # Apply model temperature and logit_bias for ground truth loss
@@ -2045,7 +2069,12 @@ class ContinualTrainer:
                 hybrid_weight = hybrid_weight.item()
             combined_logits = hybrid_weight * text_logits_masked + (1 - hybrid_weight) * learned_logits_masked
         
-        return total_loss, combined_logits, image_features if return_features else None
+        return (
+            total_loss,
+            combined_logits,
+            image_features if return_features else None,
+            text_embeddings if return_features else None
+        )
 
     def _compute_ewc_loss(self) -> torch.Tensor:
         """
