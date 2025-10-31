@@ -1343,7 +1343,7 @@ class PretrainedModel(nn.Module):
             )
 
         # Extract image features
-        image_features = self.backbone(x)
+        image_features = self.forward_features(x)
 
         # Get text features using the classifier
         return self.classifier.forward_for_pretraining_loss(image_features, targets, captions)
@@ -1411,7 +1411,7 @@ class PretrainedModel(nn.Module):
                     inputs, targets = batch
                 inputs = inputs.to(self.device)
                 targets = targets.to(self.device)
-                features = self.backbone(inputs)
+                features = self.forward_features(inputs)
 
                 # Offload features and labels to CPU to save GPU memory
                 features_list.append(features.cpu())

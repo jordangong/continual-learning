@@ -869,11 +869,17 @@ class ContinualTrainer:
                     # Compute loss based on configuration
                     if self.distillation_enabled:
                         # Competitive distillation loss (hybrid mode)
-                        loss, outputs = self._compute_competitive_distillation_loss(inputs, targets)
+                        # Request features if pretraining loss is also used to avoid double forward pass
+                        loss, outputs, image_features = self._compute_competitive_distillation_loss(
+                            inputs, targets, return_features=self.use_pretraining_loss
+                        )
                         
                         # Add pretraining loss if configured (distillation + pretraining)
+                        # Use image_features from distillation to avoid duplicate backbone forward pass
                         if self.use_pretraining_loss:
-                            pretraining_loss = self._compute_pretraining_loss(inputs, targets, captions)
+                            pretraining_loss = self._compute_pretraining_loss(
+                                inputs, targets, captions, image_features=image_features
+                            )
                             loss = loss + self.pretraining_loss_weight * pretraining_loss
                     elif self.use_pretraining_loss and self.use_regular_loss:
                         # Combined: pretraining + regular loss
@@ -965,11 +971,17 @@ class ContinualTrainer:
                 # Compute loss based on configuration
                 if self.distillation_enabled:
                     # Competitive distillation loss (hybrid mode)
-                    loss, outputs = self._compute_competitive_distillation_loss(inputs, targets)
+                    # Request features if pretraining loss is also used to avoid double forward pass
+                    loss, outputs, image_features = self._compute_competitive_distillation_loss(
+                        inputs, targets, return_features=self.use_pretraining_loss
+                    )
                     
                     # Add pretraining loss if configured (distillation + pretraining)
+                    # Use image_features from distillation to avoid duplicate backbone forward pass
                     if self.use_pretraining_loss:
-                        pretraining_loss = self._compute_pretraining_loss(inputs, targets)
+                        pretraining_loss = self._compute_pretraining_loss(
+                            inputs, targets, captions, image_features=image_features
+                        )
                         loss = loss + self.pretraining_loss_weight * pretraining_loss
                 elif self.use_pretraining_loss and self.use_regular_loss:
                     # Combined: pretraining + regular loss
@@ -1578,6 +1590,54 @@ class ContinualTrainer:
 
         return masked_outputs
 
+    def _get_pretraining_temperature_and_bias(
+        self, model_to_use
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+        """Extract pretraining temperature and logit bias from classifier.
+        
+        This helper method consolidates the logic for retrieving temperature and bias
+        parameters used in pretraining loss computation (CLIP/SigLIP contrastive loss).
+        
+        Args:
+            model_to_use: The model (unwrapped from DDP if needed)
+        
+        Returns:
+            Tuple of (temperature, logit_bias)
+            - temperature: Temperature value for contrastive loss scaling
+            - logit_bias: Optional logit bias parameter (None if not present)
+        """
+        temperature = 1.0
+        logit_bias = None
+        
+        if hasattr(model_to_use, "classifier"):
+            classifier = model_to_use.classifier
+            
+            # Get pretraining temperature (with fallback to regular temperature)
+            if hasattr(classifier, "use_log_pretraining_temperature") and classifier.use_log_pretraining_temperature:
+                if hasattr(classifier, "log_pretraining_temperature"):
+                    temperature = torch.exp(classifier.log_pretraining_temperature)
+            elif hasattr(classifier, "pretraining_temperature"):
+                temp_param = classifier.pretraining_temperature
+                if isinstance(temp_param, torch.Tensor):
+                    temperature = temp_param
+                else:
+                    temperature = torch.tensor(temp_param, device=self.device)
+            elif hasattr(classifier, "use_log_temperature") and classifier.use_log_temperature:
+                if hasattr(classifier, "log_temperature"):
+                    temperature = torch.exp(classifier.log_temperature)
+            elif hasattr(classifier, "temperature"):
+                temp_param = classifier.temperature
+                if isinstance(temp_param, torch.Tensor):
+                    temperature = temp_param
+                else:
+                    temperature = torch.tensor(temp_param, device=self.device)
+            
+            # Get logit_bias if present
+            if hasattr(classifier, "logit_bias"):
+                logit_bias = classifier.logit_bias
+        
+        return temperature, logit_bias
+
     def _compute_regular_loss(
         self,
         inputs: torch.Tensor,
@@ -1602,53 +1662,38 @@ class ContinualTrainer:
         inputs: torch.Tensor,
         targets: torch.Tensor,
         captions: Optional[List[str]] = None,
+        image_features: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Compute CLIP/SigLIP pretraining contrastive loss.
 
         Args:
-            inputs: Input images [batch_size, C, H, W]
+            inputs: Input images [batch_size, C, H, W] (ignored if image_features provided)
             targets: Target class labels [batch_size]
             captions: Optional list of caption strings [batch_size]
+            image_features: Optional pre-computed image features [batch_size, feature_dim].
+                           If provided, uses these instead of computing from inputs.
+                           This avoids duplicate backbone forward passes when combining losses.
 
         Returns:
             Pretraining loss scalar
         """
-        # Get image and text features
         model_to_use = self.model.module if hasattr(self.model, "module") else self.model
-        image_features, text_features = model_to_use.forward_for_pretraining_loss(
-            inputs, targets, captions
-        )
+        
+        # Get image and text features
+        if image_features is not None:
+            # Use pre-computed image features (from distillation or combined loss)
+            # Call classifier's forward_for_pretraining_loss which expects features
+            image_features, text_features = model_to_use.classifier.forward_for_pretraining_loss(
+                image_features, targets, captions
+            )
+        else:
+            # Compute features from scratch (full forward pass)
+            image_features, text_features = model_to_use.forward_for_pretraining_loss(
+                inputs, targets, captions
+            )
 
-        # Get pretraining temperature from model (separate from regular temperature)
-        # This allows PROOF-style setups: learnable pretraining temp + temperature=1.0 for regular loss
-        temperature = 1.0
-        if hasattr(model_to_use, "classifier"):
-            classifier = model_to_use.classifier
-            # Use separate pretraining temperature if available
-            if hasattr(classifier, "use_log_pretraining_temperature") and classifier.use_log_pretraining_temperature:
-                if hasattr(classifier, "log_pretraining_temperature"):
-                    temperature = torch.exp(classifier.log_pretraining_temperature)
-            elif hasattr(classifier, "pretraining_temperature"):
-                temp_param = classifier.pretraining_temperature
-                if isinstance(temp_param, torch.Tensor):
-                    temperature = temp_param
-                else:
-                    temperature = torch.tensor(temp_param, device=self.device)
-            # Fallback to regular temperature if pretraining temperature not configured
-            elif hasattr(classifier, "use_log_temperature") and classifier.use_log_temperature:
-                if hasattr(classifier, "log_temperature"):
-                    temperature = torch.exp(classifier.log_temperature)
-            elif hasattr(classifier, "temperature"):
-                temp_param = classifier.temperature
-                if isinstance(temp_param, torch.Tensor):
-                    temperature = temp_param
-                else:
-                    temperature = torch.tensor(temp_param, device=self.device)
-
-        # Handle logit_bias if present (for CustomTextCLIP)
-        logit_bias = None
-        if hasattr(model_to_use, "classifier") and hasattr(model_to_use.classifier, "logit_bias"):
-            logit_bias = model_to_use.classifier.logit_bias
+        # Get pretraining temperature and logit bias using helper method
+        temperature, logit_bias = self._get_pretraining_temperature_and_bias(model_to_use)
 
         # Compute contrastive loss (with optional label-aware positives)
         if self.supervised_contrastive:
@@ -1672,6 +1717,10 @@ class ContinualTrainer:
         """Compute combined loss (pretraining loss + regular loss).
 
         This should only be called when both use_pretraining_loss and use_regular_loss are True.
+        
+        IMPORTANT: Uses single forward pass to avoid memory leak. Previous implementation
+        called backbone twice (once in pretraining loss, once in regular loss), causing
+        doubled memory usage and gradual accumulation across steps.
 
         Args:
             inputs: Input images [batch_size, C, H, W]
@@ -1681,11 +1730,20 @@ class ContinualTrainer:
         Returns:
             Tuple of (total_loss, outputs)
         """
-        # Compute pretraining loss
-        pretraining_loss = self._compute_pretraining_loss(inputs, targets, captions)
-
-        # Compute regular cross-entropy loss
-        regular_loss, outputs = self._compute_regular_loss(inputs, targets)
+        model_to_use = self.model.module if hasattr(self.model, "module") else self.model
+        
+        # Single forward pass through backbone to extract features
+        image_features = model_to_use.forward_features(inputs)
+        
+        # Compute pretraining loss using extracted features (avoids duplicate forward pass)
+        pretraining_loss = self._compute_pretraining_loss(
+            inputs, targets, captions, image_features=image_features
+        )
+        
+        # Compute regular loss using same features (no additional backbone forward pass)
+        outputs = model_to_use.classifier(image_features)
+        outputs = self._apply_logit_masking(outputs, targets)
+        regular_loss = self.criterion(outputs, targets)
 
         # Combine with weights
         total_loss = (
@@ -1699,7 +1757,8 @@ class ContinualTrainer:
         self,
         inputs: torch.Tensor,
         targets: torch.Tensor,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        return_features: bool = False,
+    ) -> Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
         """Compute competitive distillation loss with ratio-based soft switching.
         
         The method computes separate losses for text and learned classifier logits,
@@ -1742,9 +1801,10 @@ class ContinualTrainer:
         Args:
             inputs: Input images [batch_size, C, H, W]
             targets: Target class labels [batch_size]
+            return_features: If True, also return image features to avoid duplicate forward pass
         
         Returns:
-            Tuple of (total_loss, combined_outputs for accuracy computation)
+            Tuple of (total_loss, combined_outputs for accuracy computation, image_features if return_features=True else None)
         """
         # Get model reference
         model_to_use = self.model.module if hasattr(self.model, "module") else self.model
@@ -1754,11 +1814,14 @@ class ContinualTrainer:
                 hasattr(model_to_use.classifier, "mode") and 
                 model_to_use.classifier.mode == "hybrid"):
             # Fallback to regular loss if not in hybrid mode
-            return self._compute_regular_loss(inputs, targets)
+            loss, outputs = self._compute_regular_loss(inputs, targets)
+            return loss, outputs, None
         
         # Forward pass to get both raw unscaled logits separately
+        # Save image features to avoid duplicate forward pass if needed for pretraining loss
+        image_features = model_to_use.forward_features(inputs)
         text_logits_raw, learned_logits_raw = model_to_use.classifier(
-            model_to_use.backbone(inputs), 
+            image_features, 
             return_separate_logits=True
         )
         
@@ -1982,7 +2045,7 @@ class ContinualTrainer:
                 hybrid_weight = hybrid_weight.item()
             combined_logits = hybrid_weight * text_logits_masked + (1 - hybrid_weight) * learned_logits_masked
         
-        return total_loss, combined_logits
+        return total_loss, combined_logits, image_features if return_features else None
 
     def _compute_ewc_loss(self) -> torch.Tensor:
         """
