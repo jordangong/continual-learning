@@ -467,6 +467,9 @@ def evaluate_dataset(
         image_features, text_features, num_samples=min(1000, len(image_features))
     )
     
+    # Compute similarity gap
+    metrics["similarity_gap"] = metrics["paired_similarity"] - metrics["unpaired_similarity"]
+    
     print("Computing CLIP loss...")
     metrics["clip_loss"] = compute_clip_loss_batchwise(
         image_features, text_features, logit_scale, batch_size=dataloader.batch_size
@@ -482,7 +485,7 @@ def evaluate_dataset(
     print("\nResults:")
     print(f"  Paired similarity:     {metrics['paired_similarity']:.4f}")
     print(f"  Unpaired similarity:   {metrics['unpaired_similarity']:.4f}")
-    print(f"  Similarity gap:        {metrics['paired_similarity'] - metrics['unpaired_similarity']:.4f}")
+    print(f"  Similarity gap:        {metrics['similarity_gap']:.4f}")
     print(f"  CLIP loss:             {metrics['clip_loss']:.4f}")
     if use_supervised:
         print(f"  Supervised loss:       {metrics['supervised_loss']:.4f}")
@@ -744,9 +747,8 @@ def main():
             base_name = dataset_name
             caption_status = "N/A" if dataset_name == "coco" else "No"
         
-        gap = metrics['paired_similarity'] - metrics['unpaired_similarity']
         print(f"{base_name:<20} {caption_status:<12} {metrics['paired_similarity']:<12.4f} "
-              f"{metrics['unpaired_similarity']:<12.4f} {gap:<10.4f} "
+              f"{metrics['unpaired_similarity']:<12.4f} {metrics['similarity_gap']:<10.4f} "
               f"{metrics['clip_loss']:<12.4f}", end="")
         if args.use_supervised and 'supervised_loss' in metrics:
             print(f"{metrics['supervised_loss']:<12.4f}", end="")
