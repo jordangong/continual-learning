@@ -1394,19 +1394,43 @@ class ContinualTrainer:
             checkpoint_path, map_location=self.device, weights_only=False
         )
 
+        # Filter out text_embeddings if there's a dimension mismatch
+        # This is safe because text embeddings are recomputed from class names
+        checkpoint_state_dict = checkpoint["model"]
+        model_state_dict = self.model.module.state_dict() if self.distributed else self.model.state_dict()
+        
+        # Check for text_embeddings dimension mismatch
+        keys_to_remove = []
+        for key in checkpoint_state_dict.keys():
+            if "text_embeddings" in key and key in model_state_dict:
+                checkpoint_shape = checkpoint_state_dict[key].shape
+                model_shape = model_state_dict[key].shape
+                if checkpoint_shape != model_shape:
+                    keys_to_remove.append(key)
+                    if not self.distributed or (self.distributed and self.local_rank == 0):
+                        print(f"Ignoring {key} due to shape mismatch: "
+                              f"checkpoint {checkpoint_shape} vs model {model_shape}")
+        
+        # Remove mismatched keys
+        for key in keys_to_remove:
+            del checkpoint_state_dict[key]
+
         # Load model state dict (handle DDP wrapper if present)
         if self.distributed:
-            self.model.module.load_state_dict(checkpoint["model"])
+            self.model.module.load_state_dict(checkpoint_state_dict, strict=False)
         else:
-            self.model.load_state_dict(checkpoint["model"])
+            self.model.load_state_dict(checkpoint_state_dict, strict=False)
 
-        scheduler_config = self.config["scheduler"]
-        use_global_scheduler = scheduler_config.get("global_scheduler", False)
-        if not use_global_scheduler and best:
-            self.optimizer.load_state_dict(checkpoint["optimizer"])
+        # Skip loading optimizer/scheduler in eval_only mode (not needed for evaluation)
+        eval_only = self.config.get("eval_only", False)
+        if not eval_only:
+            scheduler_config = self.config["scheduler"]
+            use_global_scheduler = scheduler_config.get("global_scheduler", False)
+            if not use_global_scheduler and best:
+                self.optimizer.load_state_dict(checkpoint["optimizer"])
 
-            if self.scheduler is not None and checkpoint["scheduler"] is not None:
-                self.scheduler.load_state_dict(checkpoint["scheduler"])
+                if self.scheduler is not None and checkpoint["scheduler"] is not None:
+                    self.scheduler.load_state_dict(checkpoint["scheduler"])
 
         # Load teacher model state if available and needed
         if (
