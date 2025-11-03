@@ -324,9 +324,10 @@ def compute_vocab_distance_loss(learnable_embeds: torch.Tensor, token_matrix: to
 
 
 class COCOCaptionWrapper(Dataset):
-    """Wrapper for COCO Captions that returns only first caption per image."""
-    def __init__(self, coco_dataset, max_samples: Optional[int] = None):
+    """Wrapper for COCO Captions that returns a single caption per image."""
+    def __init__(self, coco_dataset, max_samples: Optional[int] = None, random_caption: bool = False):
         self.coco_dataset = coco_dataset
+        self.random_caption = random_caption
         self.indices = list(range(len(coco_dataset)))
         if max_samples is not None and max_samples < len(self.indices):
             random.shuffle(self.indices)
@@ -338,8 +339,11 @@ class COCOCaptionWrapper(Dataset):
     def __getitem__(self, idx):
         real_idx = self.indices[idx]
         image, captions = self.coco_dataset[real_idx]
-        # Use first caption (CocoCaptions returns list of captions)
-        caption = captions[0] if captions else ""
+        # Select caption: random or first
+        if captions:
+            caption = random.choice(captions) if self.random_caption else captions[0]
+        else:
+            caption = ""
         return image, caption
 
 
@@ -348,6 +352,7 @@ def load_coco_reference(
     coco_ann_file: str,
     transform,
     max_samples: Optional[int] = None,
+    random_caption: bool = False,
 ):
     """Load COCO Captions dataset as reference."""
     if not COCO_AVAILABLE:
@@ -356,8 +361,8 @@ def load_coco_reference(
     # Load base COCO dataset
     base_dataset = CocoCaptions(root=coco_root, annFile=coco_ann_file, transform=transform)
     
-    # Wrap to return (image, first_caption) instead of (image, list_of_captions)
-    dataset = COCOCaptionWrapper(base_dataset, max_samples=max_samples)
+    # Wrap to return (image, caption) instead of (image, list_of_captions)
+    dataset = COCOCaptionWrapper(base_dataset, max_samples=max_samples, random_caption=random_caption)
     
     print(f"Loaded COCO reference: {len(dataset)} samples")
     return dataset
@@ -474,6 +479,8 @@ def main():
     # COCO reference dataset (optional)
     parser.add_argument("--use_coco_reference", action="store_true",
                         help="Use COCO Captions as reference dataset for richer gradients")
+    parser.add_argument("--coco_random_caption", action="store_true",
+                        help="Randomly select caption for each COCO sample (default: use first)")
     parser.add_argument("--coco_root", type=str, default="./data/coco/train2017",
                         help="Path to COCO images directory")
     parser.add_argument("--coco_ann_file", type=str, default="./data/coco/annotations/captions_train2017.json",
@@ -594,7 +601,8 @@ def main():
             args.coco_root,
             args.coco_ann_file,
             preprocess,
-            args.coco_samples
+            args.coco_samples,
+            args.coco_random_caption
         )
         # Use infinite sampler to prevent dataloader restart
         coco_sampler = InfiniteSampler(len(coco_dataset), shuffle=True)
