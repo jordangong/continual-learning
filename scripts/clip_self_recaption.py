@@ -13,7 +13,6 @@ Key features:
 """
 
 import argparse
-import itertools
 import json
 import random
 import sys
@@ -55,6 +54,26 @@ def set_seed(seed: int):
     torch.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
+
+
+class InfiniteSampler(torch.utils.data.Sampler):
+    """Sampler that generates infinite random indices without restarting dataloader."""
+    
+    def __init__(self, dataset_size: int, shuffle: bool = True):
+        self.dataset_size = dataset_size
+        self.shuffle = shuffle
+    
+    def __iter__(self):
+        while True:  # Infinite loop
+            if self.shuffle:
+                indices = torch.randperm(self.dataset_size).tolist()
+            else:
+                indices = list(range(self.dataset_size))
+            for idx in indices:
+                yield idx
+    
+    def __len__(self):
+        return float('inf')  # Infinite length
 
 
 class LearnableTokenDataset(Dataset):
@@ -577,15 +596,16 @@ def main():
             preprocess,
             args.coco_samples
         )
+        # Use infinite sampler to prevent dataloader restart
+        coco_sampler = InfiniteSampler(len(coco_dataset), shuffle=True)
         coco_dataloader = DataLoader(
             coco_dataset,
             batch_size=args.batch_size,
-            shuffle=True,
+            sampler=coco_sampler,  # Use infinite sampler instead of shuffle
             num_workers=args.num_workers,
             pin_memory=True,
         )
-        # Use itertools.cycle for infinite iteration (auto-restart when exhausted)
-        coco_iter = itertools.cycle(coco_dataloader)
+        coco_iter = iter(coco_dataloader)
     
     # Loss functions
     clip_loss_fn = SupervisedClipLoss() if args.use_supervised else ClipLoss()
@@ -648,7 +668,7 @@ def main():
                 # Method: Concatenate COCO pairs with target pairs, compute contrastive loss on combined batch
                 coco_loss = torch.tensor(0.0, device=device)
                 if args.use_coco_reference:
-                    # itertools.cycle automatically restarts, no exception handling needed
+                    # Infinite sampler ensures dataloader never exhausts
                     coco_images, coco_captions = next(coco_iter)
                     coco_images = coco_images.to(device)
                     
