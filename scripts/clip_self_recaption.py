@@ -450,6 +450,8 @@ def main():
     # Output
     parser.add_argument("--output", type=str, default="./learnable_tokens",
                         help="Output directory for learned tokens and training history")
+    parser.add_argument("--save_interval", type=int, default=1,
+                        help="Save checkpoint every N epochs (default: 1, save every epoch)")
     parser.add_argument("--num_workers", type=int, default=4,
                         help="Number of data loading workers")
     parser.add_argument("--seed", type=int, default=42,
@@ -686,16 +688,39 @@ def main():
         
         # Save to history
         history.append({
+            'epoch': epoch + 1,
             'clip_loss': avg_clip,
             'vocab_loss': avg_vocab,
             'coco_loss': avg_coco,
         })
+        
+        # Save checkpoint periodically
+        if (epoch + 1) % args.save_interval == 0:
+            save_checkpoint(recaptioner, args, num_samples, history, epoch=epoch+1, is_final=False)
     
-    # Save
+    # Save final checkpoint
+    save_checkpoint(recaptioner, args, num_samples, history, is_final=True)
+    
+    # Print interpretation for discrete mode
+    if args.token_mode == "discrete":
+        print("\n✓ Discrete mode: Hard token IDs saved for interpretation")
+        print("  Use these IDs to look up actual vocabulary tokens")
+
+
+def save_checkpoint(recaptioner, args, num_samples, history, epoch=None, is_final=False):
+    """Save checkpoint with learnable tokens and training state."""
     output_dir = Path(args.output)
     output_dir.mkdir(parents=True, exist_ok=True)
     
-    output_file = output_dir / f"{args.dataset}_{args.split}_tokens{args.num_tokens}_{args.token_mode}.pt"
+    # Determine filename
+    if is_final:
+        output_file = output_dir / f"{args.dataset}_{args.split}_tokens{args.num_tokens}_{args.token_mode}_final.pt"
+        history_file = output_dir / f"{args.dataset}_{args.split}_history_{args.token_mode}.json"
+    else:
+        output_file = output_dir / f"{args.dataset}_{args.split}_tokens{args.num_tokens}_{args.token_mode}_epoch{epoch}.pt"
+        history_file = None  # Only save history at the end
+    
+    # Build save dict
     save_dict = {
         'dataset_name': args.dataset,
         'split': args.split,
@@ -710,6 +735,7 @@ def main():
         'vocab_loss_weight': args.vocab_loss_weight,
         'use_supervised': args.use_supervised,
         'use_coco_reference': args.use_coco_reference,
+        'epoch': epoch if epoch is not None else len(history),
     }
     
     # Save appropriate parameters based on mode
@@ -722,20 +748,23 @@ def main():
             hard_token_ids = recaptioner.learnable_logits.argmax(dim=-1).cpu()
             save_dict['hard_token_ids'] = hard_token_ids
     
+    # Save checkpoint
     torch.save(save_dict, output_file)
-    print(f"\n✓ Saved tokens to: {output_file}")
-    print(f"  File size: {output_file.stat().st_size / (1024**2):.2f} MB")
+    file_size_mb = output_file.stat().st_size / (1024**2)
     
-    # Save history
-    history_file = output_dir / f"{args.dataset}_{args.split}_history_{args.token_mode}.json"
-    with open(history_file, 'w') as f:
-        json.dump(history, f, indent=2)
-    print(f"✓ Saved history to: {history_file}")
+    if is_final:
+        print(f"\n✓ Saved final tokens to: {output_file}")
+        print(f"  File size: {file_size_mb:.2f} MB")
+        
+        # Save history
+        if history_file:
+            with open(history_file, 'w') as f:
+                json.dump(history, f, indent=2)
+            print(f"✓ Saved history to: {history_file}")
+    else:
+        print(f"  Checkpoint saved: {output_file.name} ({file_size_mb:.2f} MB)")
     
-    # Print interpretation for discrete mode
-    if args.token_mode == "discrete":
-        print("\n✓ Discrete mode: Hard token IDs saved for interpretation")
-        print("  Use these IDs to look up actual vocabulary tokens")
+    return output_file
 
 
 if __name__ == "__main__":
