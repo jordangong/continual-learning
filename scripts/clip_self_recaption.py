@@ -13,6 +13,7 @@ Key features:
 """
 
 import argparse
+import itertools
 import json
 import random
 import sys
@@ -583,7 +584,8 @@ def main():
             num_workers=args.num_workers,
             pin_memory=True,
         )
-        coco_iter = iter(coco_dataloader)
+        # Use itertools.cycle for infinite iteration (auto-restart when exhausted)
+        coco_iter = itertools.cycle(coco_dataloader)
     
     # Loss functions
     clip_loss_fn = SupervisedClipLoss() if args.use_supervised else ClipLoss()
@@ -614,10 +616,6 @@ def main():
         total_vocab_loss = 0.0
         total_coco_loss = 0.0
         num_batches = 0
-        
-        # Reset COCO iterator
-        if args.use_coco_reference:
-            coco_iter = iter(coco_dataloader)
         
         pbar = tqdm(dataloader, desc=f"Epoch {epoch+1}/{args.epochs}")
         for images, labels, class_names_batch, sample_indices in pbar:
@@ -650,12 +648,8 @@ def main():
                 # Method: Concatenate COCO pairs with target pairs, compute contrastive loss on combined batch
                 coco_loss = torch.tensor(0.0, device=device)
                 if args.use_coco_reference:
-                    try:
-                        coco_images, coco_captions = next(coco_iter)
-                    except StopIteration:
-                        coco_iter = iter(coco_dataloader)
-                        coco_images, coco_captions = next(coco_iter)
-                    
+                    # itertools.cycle automatically restarts, no exception handling needed
+                    coco_images, coco_captions = next(coco_iter)
                     coco_images = coco_images.to(device)
                     
                     # Encode COCO images (frozen)
