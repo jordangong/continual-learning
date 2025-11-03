@@ -120,15 +120,32 @@ class CLIPSelfRecaptioner(nn.Module):
         
         # Initialize learnable parameters based on mode
         if token_mode == "embedding":
-            # Option A: Learn embeddings directly in R^D
-            # Initialize from token embedding distribution for better convergence
-            token_mean = token_emb.mean(dim=0, keepdim=True)
-            token_std = token_emb.std(dim=0, keepdim=True)
-            self.learnable_tokens = nn.Parameter(
-                (token_mean + token_std * torch.randn(
-                    num_samples, num_learnable_tokens, self.embed_dim, device=device
-                )).to(dtype=self.dtype)
+            # Option A: Reparameterized embeddings (direction × scale)
+            # This decouples direction learning from magnitude, ensuring stable norms
+            
+            # Initialize directions from token embedding distribution
+            token_mean = token_emb.mean(dim=0, keepdim=True)  # [1, D]
+            token_std = token_emb.std(dim=0, keepdim=True)    # [1, D]
+            init_directions = token_mean + token_std * torch.randn(
+                num_samples, num_learnable_tokens, self.embed_dim, device=device
             )
+            # Normalize to unit sphere (L2 norm = 1)
+            init_directions = F.normalize(init_directions, dim=-1)
+            
+            # Initialize scales to match average token norm
+            token_norms = torch.norm(token_emb, dim=1)  # [vocab_size]
+            avg_token_norm = token_norms.mean()
+            init_scales = torch.full(
+                (num_samples, num_learnable_tokens, 1),
+                avg_token_norm.item(),
+                device=device
+            )
+            
+            # Learnable parameters: directions (unit norm) and scales
+            self.learnable_directions = nn.Parameter(init_directions.to(dtype=self.dtype))
+            self.learnable_scales = nn.Parameter(init_scales.to(dtype=self.dtype))
+            # Store reference norm for monitoring
+            self.register_buffer("avg_token_norm", avg_token_norm)
         elif token_mode == "discrete":
             # Option B: Learn soft token IDs (logits over vocabulary)
             # Initialize logits with small noise (uniform over vocab initially)
@@ -149,15 +166,18 @@ class CLIPSelfRecaptioner(nn.Module):
         Get learnable token embeddings for given sample indices.
         
         Args:
-            sample_indices: [batch_size] indices
-            hard: If True and mode='discrete', use hard (argmax) selection
+            sample_indices: [batch_size] indices of samples
+            hard: If True and token_mode='discrete', use hard argmax instead of soft Gumbel
         
         Returns:
             embeddings: [batch_size, num_learnable_tokens, embed_dim]
         """
-        if self.token_mode == "embedding":
-            # Directly return learned embeddings
-            return self.learnable_tokens[sample_indices]
+        if self.token_mode == 'embedding':
+            # Reparameterized: normalize directions to unit sphere, then scale
+            # This ensures stable norms throughout training
+            directions = F.normalize(self.learnable_directions[sample_indices], dim=-1)
+            scales = self.learnable_scales[sample_indices]
+            return directions * scales  # [batch_size, num_tokens, embed_dim]
         
         elif self.token_mode == "discrete":
             # Get logits for these samples
@@ -200,20 +220,22 @@ class CLIPSelfRecaptioner(nn.Module):
         for i, class_name in enumerate(class_names):
             # Tokenize class name
             text = f"a photo of a {class_name.replace('_', ' ')}"
-            tokens = self.tokenizer.encode(text)
+            # encode() returns raw tokens WITHOUT SOS/EOT
+            text_tokens = self.tokenizer.encode(text)
             
-            # Get class embeddings (exclude EOT)
-            class_embeds = self.token_embedding_matrix[tokens[:-1]]
+            # Get embeddings: [SOS] + text + learnable + [EOT]
+            sot_embed = self.token_embedding_matrix[self.tokenizer.sot_token_id].unsqueeze(0)
+            text_embeds = self.token_embedding_matrix[text_tokens]
             
             # Get learnable tokens for this sample
             learnable_embeds = learnable_embeds_batch[i]
             
-            # Concatenate: class + learnable + EOT
+            # Concatenate: [SOS] + text + learnable + [EOT]
             eot_embed = self.token_embedding_matrix[self.eot_token].unsqueeze(0)
-            combined = torch.cat([class_embeds, learnable_embeds, eot_embed], dim=0)
+            combined = torch.cat([sot_embed, text_embeds, learnable_embeds, eot_embed], dim=0)
             
-            # Record EOT position
-            eot_pos = len(class_embeds) + self.num_learnable_tokens
+            # Record EOT position (after SOS + text + learnable)
+            eot_pos = 1 + len(text_tokens) + self.num_learnable_tokens
             eot_positions[i] = eot_pos
             
             # Copy to output
@@ -537,8 +559,8 @@ def main():
     
     # Count learnable parameters
     if args.token_mode == "embedding":
-        num_params = recaptioner.learnable_tokens.numel()
-        param_dtype = recaptioner.learnable_tokens.dtype
+        num_params = recaptioner.learnable_directions.numel() + recaptioner.learnable_scales.numel()
+        param_dtype = recaptioner.learnable_directions.dtype
     else:  # discrete
         num_params = recaptioner.learnable_logits.numel()
         param_dtype = recaptioner.learnable_logits.dtype
@@ -565,10 +587,13 @@ def main():
     
     # Loss functions
     clip_loss_fn = SupervisedClipLoss() if args.use_supervised else ClipLoss()
+    # Always create both loss functions for monitoring
+    supervised_clip_loss_fn = SupervisedClipLoss()
+    unsupervised_clip_loss_fn = ClipLoss()
     
     # Optimizer - optimize different parameters based on mode
     if args.token_mode == "embedding":
-        optimizer = torch.optim.AdamW([recaptioner.learnable_tokens], lr=args.lr)
+        optimizer = torch.optim.AdamW([recaptioner.learnable_directions, recaptioner.learnable_scales], lr=args.lr)
     else:  # discrete
         optimizer = torch.optim.AdamW([recaptioner.learnable_logits], lr=args.lr)
     
@@ -584,6 +609,8 @@ def main():
     for epoch in range(args.epochs):
         recaptioner.train()
         total_clip_loss = 0.0
+        total_supervised_clip_loss = 0.0  # Always monitor both
+        total_unsupervised_clip_loss = 0.0
         total_vocab_loss = 0.0
         total_coco_loss = 0.0
         num_batches = 0
@@ -604,11 +631,15 @@ def main():
                 image_features, text_features = recaptioner(images, class_names_batch, sample_indices)
                 
                 # CLIP contrastive loss (main objective)
-                # If use_supervised=True, adds same-class alignment term
+                # Always compute both supervised and unsupervised for monitoring
+                supervised_clip_loss = supervised_clip_loss_fn(image_features, text_features, logit_scale, labels=labels)
+                unsupervised_clip_loss = unsupervised_clip_loss_fn(image_features, text_features, logit_scale)
+                
+                # Choose which one to optimize
                 if args.use_supervised:
-                    clip_loss = clip_loss_fn(image_features, text_features, logit_scale, labels=labels)
+                    clip_loss = supervised_clip_loss
                 else:
-                    clip_loss = clip_loss_fn(image_features, text_features, logit_scale)
+                    clip_loss = unsupervised_clip_loss
                 
                 # Vocab distance loss (semantic grounding)
                 learnable_embeds = recaptioner.get_learnable_embeddings(sample_indices, hard=False)
@@ -665,34 +696,50 @@ def main():
             
             # Track
             total_clip_loss += clip_loss.item()
+            total_supervised_clip_loss += supervised_clip_loss.item()
+            total_unsupervised_clip_loss += unsupervised_clip_loss.item()
             total_vocab_loss += vocab_loss.item()
             total_coco_loss += coco_loss.item()
             num_batches += 1
             
-            # Update progress bar
-            postfix = {'clip': f'{clip_loss.item():.4f}', 'vocab': f'{vocab_loss.item():.4f}'}
+            # Update progress bar - always show both losses
+            postfix = {
+                'clip_sup': f'{supervised_clip_loss.item():.4f}',
+                'clip_uns': f'{unsupervised_clip_loss.item():.4f}',
+                'vocab': f'{vocab_loss.item():.4f}'
+            }
             if args.use_coco_reference:
                 postfix['coco'] = f'{coco_loss.item():.4f}'
             pbar.set_postfix(postfix)
         
         # Epoch summary
         avg_clip = total_clip_loss / num_batches
+        avg_supervised_clip = total_supervised_clip_loss / num_batches
+        avg_unsupervised_clip = total_unsupervised_clip_loss / num_batches
         avg_vocab = total_vocab_loss / num_batches
         avg_coco = total_coco_loss / num_batches
         
         print(f"\nEpoch {epoch+1}/{args.epochs} Summary:")
-        print(f"  CLIP Loss: {avg_clip:.4f}")
+        if args.use_supervised:
+            print(f"  CLIP Loss (Supervised, optimizing): {avg_supervised_clip:.4f}")
+            print(f"  CLIP Loss (Unsupervised, monitoring): {avg_unsupervised_clip:.4f}")
+        else:
+            print(f"  CLIP Loss (Unsupervised, optimizing): {avg_unsupervised_clip:.4f}")
+            print(f"  CLIP Loss (Supervised, monitoring): {avg_supervised_clip:.4f}")
         print(f"  Vocab Loss: {avg_vocab:.4f}")
         if args.use_coco_reference:
             print(f"  COCO Loss: {avg_coco:.4f}")
         
         # Save to history
-        history.append({
+        epoch_data = {
             'epoch': epoch + 1,
-            'clip_loss': avg_clip,
+            'clip_loss': avg_clip,  # The one being optimized
+            'supervised_clip_loss': avg_supervised_clip,  # Always track both
+            'unsupervised_clip_loss': avg_unsupervised_clip,
             'vocab_loss': avg_vocab,
             'coco_loss': avg_coco,
-        })
+        }
+        history.append(epoch_data)
         
         # Save checkpoint periodically
         if (epoch + 1) % args.save_interval == 0:
@@ -738,9 +785,17 @@ def save_checkpoint(recaptioner, args, num_samples, history, epoch=None, is_fina
         'epoch': epoch if epoch is not None else len(history),
     }
     
-    # Save appropriate parameters based on mode
+    # Save learnable parameters based on mode
     if args.token_mode == "embedding":
-        save_dict['learnable_tokens'] = recaptioner.learnable_tokens.detach().cpu()
+        # Save reparameterized form: directions + scales
+        save_dict['learnable_directions'] = recaptioner.learnable_directions.detach().cpu()
+        save_dict['learnable_scales'] = recaptioner.learnable_scales.detach().cpu()
+        save_dict['avg_token_norm'] = recaptioner.avg_token_norm.detach().cpu()
+        # For backward compatibility, also save combined embeddings
+        with torch.no_grad():
+            directions = F.normalize(recaptioner.learnable_directions, dim=-1)
+            embeddings = directions * recaptioner.learnable_scales
+        save_dict['learnable_tokens'] = embeddings.detach().cpu()
     else:  # discrete
         save_dict['learnable_logits'] = recaptioner.learnable_logits.detach().cpu()
         # Also save hard token IDs for interpretation

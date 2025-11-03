@@ -84,6 +84,130 @@ class ClassNameDataset(Dataset):
         return image, label, caption
 
 
+class LearnableTokenDataset(Dataset):
+    """Wrapper to add learnable token captions from CLIP self-recaptioning."""
+    
+    def __init__(self, base_dataset: Dataset, class_names: List[str], checkpoint_path: str, token_embedding, tokenizer):
+        """
+        Args:
+            base_dataset: Base dataset (images and labels)
+            class_names: List of class names
+            checkpoint_path: Path to saved learnable tokens checkpoint
+            token_embedding: CLIP token embedding matrix
+            tokenizer: CLIP tokenizer
+        """
+        self.base_dataset = base_dataset
+        self.class_names = class_names
+        self.tokenizer = tokenizer
+        
+        # Load checkpoint
+        print(f"Loading learnable tokens from: {checkpoint_path}")
+        checkpoint = torch.load(checkpoint_path, map_location='cpu')
+        
+        # Extract metadata
+        self.token_mode = checkpoint['token_mode']
+        self.num_learnable_tokens = checkpoint['num_learnable_tokens']
+        self.embed_dim = checkpoint['embed_dim']
+        
+        # Load learnable parameters
+        if self.token_mode == 'embedding':
+            # Check if reparameterized format is available (new format)
+            if 'learnable_directions' in checkpoint and 'learnable_scales' in checkpoint:
+                self.learnable_directions = checkpoint['learnable_directions']
+                self.learnable_scales = checkpoint['learnable_scales']
+                self.use_reparameterized = True
+                print("  Using reparameterized format (directions + scales)")
+            else:
+                # Backward compatibility: load combined embeddings
+                self.learnable_tokens = checkpoint['learnable_tokens']
+                self.use_reparameterized = False
+                print("  Using legacy format (combined embeddings)")
+        else:  # discrete
+            self.learnable_logits = checkpoint['learnable_logits']
+            self.gumbel_temperature = checkpoint.get('gumbel_temperature', 1.0)
+            self.use_reparameterized = False
+        
+        # Get token embedding matrix from CLIP model
+        self.token_embedding_matrix = token_embedding
+        self.sot_token = 49406
+        self.eot_token = 49407
+        self.context_length = 77
+        
+        print(f"  Mode: {self.token_mode}")
+        print(f"  Num learnable tokens: {self.num_learnable_tokens}")
+        if self.token_mode == 'embedding':
+            num_samples = self.learnable_directions.shape[0] if self.use_reparameterized else self.learnable_tokens.shape[0]
+        else:
+            num_samples = self.learnable_logits.shape[0]
+        print(f"  Num samples: {num_samples}")
+    
+    def __len__(self):
+        return len(self.base_dataset)
+    
+    def get_learnable_embeddings(self, sample_idx: int) -> torch.Tensor:
+        """Get learnable token embeddings for a single sample."""
+        if self.token_mode == 'embedding':
+            if self.use_reparameterized:
+                # Reparameterized: normalize directions to unit sphere, then scale
+                directions = self.learnable_directions[sample_idx]  # [num_tokens, embed_dim]
+                directions = F.normalize(directions, dim=-1)
+                scales = self.learnable_scales[sample_idx]  # [num_tokens, 1]
+                return directions * scales  # [num_tokens, embed_dim]
+            else:
+                # Legacy: direct embeddings
+                return self.learnable_tokens[sample_idx]  # [num_tokens, embed_dim]
+        else:  # discrete - use hard argmax for evaluation
+            # Get logits for this sample
+            logits = self.learnable_logits[sample_idx]  # [num_tokens, vocab_size]
+            # Hard selection (argmax)
+            token_ids = logits.argmax(dim=-1)  # [num_tokens]
+            # Lookup embeddings
+            return self.token_embedding_matrix[token_ids]  # [num_tokens, embed_dim]
+    
+    def build_text_embedding(self, class_name: str, sample_idx: int):
+        """Build text embedding: [SOS] + text + learnable + [EOT].
+        
+        Returns:
+            embedding: [context_length, embed_dim] tensor
+            eot_position: int, position of EOT token
+        """
+        # Tokenize class name
+        text = f"a photo of a {class_name.replace('_', ' ')}"
+        # encode() returns raw tokens WITHOUT SOS/EOT
+        text_tokens = self.tokenizer.encode(text)
+        
+        # Get embeddings: [SOS] + text + learnable + [EOT]
+        sot_embed = self.token_embedding_matrix[self.tokenizer.sot_token_id].unsqueeze(0)
+        text_embeds = self.token_embedding_matrix[text_tokens]  # [text_len, embed_dim]
+        
+        # Get learnable tokens for this sample
+        learnable_embeds = self.get_learnable_embeddings(sample_idx)  # [num_tokens, embed_dim]
+        
+        # Concatenate: [SOS] + text + learnable + [EOT]
+        eot_embed = self.token_embedding_matrix[self.eot_token].unsqueeze(0)
+        combined = torch.cat([sot_embed, text_embeds, learnable_embeds, eot_embed], dim=0)
+        
+        # Record EOT position (after SOS + text + learnable)
+        eot_position = 1 + len(text_tokens) + self.num_learnable_tokens
+        
+        # Create full sequence (padded to context_length)
+        embedding = torch.zeros(self.context_length, self.embed_dim, dtype=self.token_embedding_matrix.dtype)
+        seq_len = min(combined.shape[0], self.context_length)
+        embedding[:seq_len] = combined[:seq_len]
+        
+        return embedding, eot_position
+    
+    def __getitem__(self, idx):
+        image, label = self.base_dataset[idx]
+        
+        # Build text embedding using learnable tokens
+        text_embedding, eot_position = self.build_text_embedding(self.class_names[label], idx)
+        
+        # Return embedding and EOT position
+        # Store as dict to pass both values
+        return image, label, {'embedding': text_embedding, 'eot_position': eot_position}
+
+
 def set_seed(seed: int):
     """Set random seeds for reproducibility."""
     random.seed(seed)
@@ -117,9 +241,12 @@ def load_target_dataset(
     data_dir: str,
     split: str,
     caption_dir: Optional[str],
+    learnable_tokens_path: Optional[str],
+    token_embedding,
+    tokenizer,
     transform,
     seed: int = 42,
-):
+) -> Dataset:
     """Load target dataset with optional captions."""
     # Use same logic as recaptioning.py
     num_steps = 1
@@ -252,26 +379,30 @@ def load_target_dataset(
     class_names = dataset.get_class_names(all_class_indices)
     
     # Wrap with captions or class names
-    if caption_dir is not None:
-        caption_file = Path(caption_dir) / f"{dataset_name}_{split}_captions.json"
-        if caption_file.exists():
-            # Use create_caption_dataset to load captions
-            captioned_dataset = create_caption_dataset(
-                base_dataset=base_dataset,
-                caption_dir=caption_dir,
-                dataset_name=dataset_name,
-                split=split,
-                sample_strategy="first",  # Use first caption for consistency
-                seed=seed,
-            )
-            if captioned_dataset is not None:
-                return captioned_dataset
-            print(f"Warning: Failed to create caption dataset from {caption_file}, using class names")
-        else:
-            print(f"Warning: Caption file not found: {caption_file}, using class names")
+    if learnable_tokens_path is not None:
+        # Use learnable tokens from CLIP self-recaptioning
+        dataset = LearnableTokenDataset(
+            base_dataset=base_dataset,
+            class_names=class_names,
+            checkpoint_path=learnable_tokens_path,
+            token_embedding=token_embedding,
+            tokenizer=tokenizer,
+        )
+    elif caption_dir is not None:
+        # Load captions from JSON files
+        dataset = create_caption_dataset(
+            base_dataset=base_dataset,
+            caption_dir=caption_dir,
+            dataset_name=dataset_name,
+            split=split,
+            sample_strategy="first",  # Use first caption for consistency
+            seed=seed,
+        )
+    else:
+        # Use class names as captions
+        dataset = ClassNameDataset(base_dataset, class_names)
     
-    # Fallback: use class names
-    return ClassNameDataset(base_dataset, class_names)
+    return dataset
 
 
 @torch.no_grad()
@@ -305,14 +436,50 @@ def extract_features(
         image_features = model.encode_image(images)
         image_features = F.normalize(image_features, p=2, dim=1)
         
-        # Tokenize and encode text
-        if isinstance(captions, (list, tuple)):
-            text_tokens = tokenizer(captions).to(device)
+        # Handle text features (either encode captions or use pre-computed embeddings)
+        if isinstance(captions, dict) and 'embedding' in captions:
+            # LearnableTokenDataset returns text embeddings directly
+            # Extract embeddings and EOT positions
+            text_embeddings = captions['embedding'].to(device)
+            eot_positions = captions['eot_position'].to(device)
+            
+            # Encode using OpenCLIP's pattern (from clip_self_recaption.py)
+            # Cast to transformer's dtype
+            cast_dtype = model.transformer.get_cast_dtype()
+            
+            # Add positional embeddings (with dtype casting)
+            x = text_embeddings.to(cast_dtype) + model.positional_embedding.to(cast_dtype)
+            
+            # Transformer (with attention mask, OpenCLIP expects batch-first)
+            x = model.transformer(x, attn_mask=model.attn_mask)
+            
+            # Layer norm
+            x = model.ln_final(x)
+            
+            # Extract at EOT positions
+            batch_size = x.shape[0]
+            text_features = x[torch.arange(batch_size, device=device), eot_positions]
+            
+            # Text projection (handle both nn.Linear and matrix multiplication)
+            if model.text_projection is not None:
+                if hasattr(model.text_projection, '__call__') and hasattr(model.text_projection, 'weight'):
+                    # nn.Linear
+                    text_features = model.text_projection(text_features)
+                else:
+                    # Matrix
+                    text_features = text_features @ model.text_projection
+            
+            # Normalize
+            text_features = F.normalize(text_features, p=2, dim=1)
         else:
-            text_tokens = tokenizer([captions]).to(device)
-        
-        text_features = model.encode_text(text_tokens)
-        text_features = F.normalize(text_features, p=2, dim=1)
+            # Normal case: tokenize and encode text
+            if isinstance(captions, (list, tuple)):
+                text_tokens = tokenizer(captions).to(device)
+            else:
+                text_tokens = tokenizer([captions]).to(device)
+            
+            text_features = model.encode_text(text_tokens)
+            text_features = F.normalize(text_features, p=2, dim=1)
         
         image_features_list.append(image_features.cpu())
         text_features_list.append(text_features.cpu())
@@ -528,6 +695,13 @@ def main():
         help="Datasets to evaluate (coco for reference, plus target datasets)",
     )
     parser.add_argument(
+        "--split",
+        type=str,
+        default="test",
+        choices=["train", "test"],
+        help="Dataset split to evaluate (default: test)",
+    )
+    parser.add_argument(
         "--data_dir",
         type=str,
         default="./data",
@@ -538,6 +712,12 @@ def main():
         type=str,
         default=None,
         help="Directory containing caption JSON files (optional)",
+    )
+    parser.add_argument(
+        "--learnable_tokens_path",
+        type=str,
+        default=None,
+        help="Path to saved learnable tokens checkpoint from clip_self_recaption.py (optional)",
     )
     parser.add_argument(
         "--coco_dir",
@@ -664,25 +844,31 @@ def main():
                 all_results[dataset_name] = metrics
                 
             else:
-                # Target datasets - evaluate with and without captions if caption_dir provided
-                caption_configs = []
+                # Target datasets - evaluate with different caption/token configurations
+                eval_configs = []
                 
-                if args.caption_dir is not None:
+                # Build evaluation configurations based on what's provided
+                if args.learnable_tokens_path is not None:
+                    # Evaluate both with learnable tokens and without (for comparison)
+                    eval_configs.append(("with_learnable_tokens", None, args.learnable_tokens_path))
+                    eval_configs.append(("without_learnable_tokens", None, None))
+                elif args.caption_dir is not None:
                     # Evaluate both with and without captions for comparison
-                    caption_configs = [
-                        ("with_captions", args.caption_dir),
-                        ("without_captions", None),
-                    ]
+                    eval_configs.append(("with_captions", args.caption_dir, None))
+                    eval_configs.append(("without_captions", None, None))
                 else:
-                    # Only evaluate without captions (class names only)
-                    caption_configs = [("", None)]
+                    # Only evaluate with class names (baseline)
+                    eval_configs.append(("", None, None))
                 
-                for suffix, caption_dir in caption_configs:
+                for suffix, caption_dir, learnable_tokens_path in eval_configs:
                     dataset = load_target_dataset(
                         dataset_name=dataset_name,
                         data_dir=args.data_dir,
-                        split="test",  # Always use test split
+                        split=args.split,
                         caption_dir=caption_dir,
+                        learnable_tokens_path=learnable_tokens_path,
+                        token_embedding=model.token_embedding.weight.data.cpu(),
+                        tokenizer=tokenizer,
                         transform=preprocess,
                         seed=args.seed,
                     )
@@ -743,8 +929,14 @@ def main():
     print("-" * separator_length)
     
     for dataset_name, metrics in all_results.items():
-        # Parse dataset name to extract caption info
-        if dataset_name.endswith("_with_captions"):
+        # Parse dataset name to extract caption/token info
+        if dataset_name.endswith("_with_learnable_tokens"):
+            base_name = dataset_name[:-22]  # Remove "_with_learnable_tokens"
+            caption_status = "Tokens"
+        elif dataset_name.endswith("_without_learnable_tokens"):
+            base_name = dataset_name[:-25]  # Remove "_without_learnable_tokens"
+            caption_status = "No"
+        elif dataset_name.endswith("_with_captions"):
             base_name = dataset_name[:-14]  # Remove "_with_captions"
             caption_status = "Yes"
         elif dataset_name.endswith("_without_captions"):
