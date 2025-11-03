@@ -406,6 +406,8 @@ def main():
                         help="OpenCLIP model name (e.g., ViT-B-16, ViT-L-14)")
     parser.add_argument("--pretrained", type=str, default="openai",
                         help="Pretrained weights source (e.g., openai, laion2b_s34b_b79k)")
+    parser.add_argument("--cache_dir", type=str, default="./cache",
+                        help="Cache directory for OpenCLIP model")
     
     # Token learning mode
     parser.add_argument("--token_mode", type=str, default="embedding", choices=["embedding", "discrete"],
@@ -481,7 +483,11 @@ def main():
     
     # Load CLIP
     print(f"\nLoading CLIP: {args.model} (pretrained: {args.pretrained})")
-    clip_model, _, preprocess = open_clip.create_model_and_transforms(args.model, pretrained=args.pretrained)
+    clip_model, _, preprocess = open_clip.create_model_and_transforms(
+        args.model,
+        pretrained=args.pretrained,
+        cache_dir=args.cache_dir,
+    )
     clip_model = clip_model.to(device).eval()
     tokenizer = open_clip.get_tokenizer(args.model)
     

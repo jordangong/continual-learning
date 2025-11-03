@@ -93,7 +93,7 @@ def set_seed(seed: int):
         torch.cuda.manual_seed_all(seed)
 
 
-def load_clip_model(model_name: str, pretrained: str, device: str):
+def load_clip_model(model_name: str, pretrained: str, cache_dir: str, device: str):
     """Load CLIP model from open_clip."""
     if not CLIP_AVAILABLE:
         raise ImportError("open_clip not available. Install with: pip install open-clip-torch")
@@ -102,6 +102,7 @@ def load_clip_model(model_name: str, pretrained: str, device: str):
     model, _, preprocess = open_clip.create_model_and_transforms(
         model_name,
         pretrained=pretrained,
+        cache_dir=cache_dir,
         device=device,
     )
     model.eval()
@@ -511,6 +512,12 @@ def main():
         default="openai",
         help="Pretrained weights (e.g., openai, laion400m_e32, laion2b_s34b_b88k)",
     )
+    parser.add_argument(
+        "--cache_dir",
+        type=str,
+        default="./cache",
+        help="Cache directory for OpenCLIP model",
+    )
     
     # Dataset arguments
     parser.add_argument(
@@ -587,7 +594,7 @@ def main():
     
     # Load CLIP model
     model, preprocess, tokenizer = load_clip_model(
-        args.model, args.pretrained, device
+        args.model, args.pretrained, args.cache_dir, device
     )
     
     # Evaluate each dataset
