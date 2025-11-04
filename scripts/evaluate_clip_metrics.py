@@ -527,6 +527,46 @@ def compute_unpaired_similarity(
     return similarities.mean().item()
 
 
+def compute_same_class_shuffled_similarity(
+    image_features: torch.Tensor,
+    text_features: torch.Tensor,
+    labels: torch.Tensor,
+) -> float:
+    """
+    Compute mean cosine similarity for same-class but shuffled pairs.
+    
+    For each image, pair it with a random caption from the same class (not itself).
+    This metric helps verify if learned tokens capture class-level semantics:
+    - Should be lower than paired similarity (not exact match)
+    - Should be higher than unpaired similarity (same class)
+    - Gap from paired shows generalization within class
+    """
+    unique_labels = labels.unique()
+    
+    similarities = []
+    
+    for label in unique_labels:
+        # Get all indices for this class
+        class_mask = labels == label
+        class_indices = torch.where(class_mask)[0]
+        
+        # Skip if only one sample in class
+        if len(class_indices) <= 1:
+            continue
+        
+        # For each sample in this class, pair with random other sample from same class
+        for idx in class_indices:
+            # Sample another index from same class (excluding itself)
+            other_indices = class_indices[class_indices != idx]
+            shuffled_idx = other_indices[torch.randint(0, len(other_indices), (1,))].item()
+            
+            # Compute similarity between image and shuffled same-class text
+            sim = (image_features[idx] * text_features[shuffled_idx]).sum().item()
+            similarities.append(sim)
+    
+    return sum(similarities) / len(similarities) if similarities else 0.0
+
+
 def compute_clip_loss_batchwise(
     image_features: torch.Tensor,
     text_features: torch.Tensor,
@@ -638,6 +678,13 @@ def evaluate_dataset(
     # Compute similarity gap
     metrics["similarity_gap"] = metrics["paired_similarity"] - metrics["unpaired_similarity"]
     
+    # Compute same-class shuffled similarity (if supervised)
+    if use_supervised:
+        print("Computing same-class shuffled similarity...")
+        metrics["same_class_shuffled_similarity"] = compute_same_class_shuffled_similarity(
+            image_features, text_features, labels
+        )
+    
     print("Computing CLIP loss...")
     metrics["clip_loss"] = compute_clip_loss_batchwise(
         image_features, text_features, logit_scale, batch_size=dataloader.batch_size
@@ -651,12 +698,19 @@ def evaluate_dataset(
     
     # Print results
     print("\nResults:")
-    print(f"  Paired similarity:     {metrics['paired_similarity']:.4f}")
-    print(f"  Unpaired similarity:   {metrics['unpaired_similarity']:.4f}")
-    print(f"  Similarity gap:        {metrics['similarity_gap']:.4f}")
-    print(f"  CLIP loss:             {metrics['clip_loss']:.4f}")
+    print(f"  Paired similarity:                   {metrics['paired_similarity']:.4f}")
     if use_supervised:
-        print(f"  Supervised loss:       {metrics['supervised_loss']:.4f}")
+        print(f"  Same-class shuffled similarity:      {metrics['same_class_shuffled_similarity']:.4f}")
+    print(f"  Unpaired similarity:                 {metrics['unpaired_similarity']:.4f}")
+    print(f"  Similarity gap (paired-unpaired):    {metrics['similarity_gap']:.4f}")
+    if use_supervised:
+        in_class_gap = metrics['paired_similarity'] - metrics['same_class_shuffled_similarity']
+        cross_class_gap = metrics['same_class_shuffled_similarity'] - metrics['unpaired_similarity']
+        print(f"  In-class gap (paired-shuffled):      {in_class_gap:.4f}")
+        print(f"  Cross-class gap (shuffled-unpaired): {cross_class_gap:.4f}")
+    print(f"  CLIP loss:                           {metrics['clip_loss']:.4f}")
+    if use_supervised:
+        print(f"  Supervised loss:                     {metrics['supervised_loss']:.4f}")
     
     return metrics
 
@@ -921,11 +975,14 @@ def main():
     print(f"Random seed: {args.seed}")
     
     print("\nDataset comparison:")
-    print(f"{'Dataset':<20} {'Captions':<12} {'Paired Sim':<12} {'Unpaired Sim':<12} {'Gap':<10} {'CLIP Loss':<12}", end="")
+    # Header
     if args.use_supervised:
-        print(f"{'Sup Loss':<12}", end="")
-    print()
-    separator_length = 82 if not args.use_supervised else 95
+        print(f"{'Dataset':<20} {'Captions':<10} {'Paired':<10} {'Shuffled':<10} {'Unpaired':<10} "
+              f"{'Gap':<10} {'In-Class':<10} {'Cross-Cls':<10} {'CLIP Loss':<10} {'Sup Loss':<10}")
+        separator_length = 118
+    else:
+        print(f"{'Dataset':<20} {'Captions':<12} {'Paired Sim':<12} {'Unpaired Sim':<12} {'Gap':<10} {'CLIP Loss':<12}")
+        separator_length = 82
     print("-" * separator_length)
     
     for dataset_name, metrics in all_results.items():
@@ -946,12 +1003,23 @@ def main():
             base_name = dataset_name
             caption_status = "N/A" if dataset_name == "coco" else "No"
         
-        print(f"{base_name:<20} {caption_status:<12} {metrics['paired_similarity']:<12.4f} "
-              f"{metrics['unpaired_similarity']:<12.4f} {metrics['similarity_gap']:<10.4f} "
-              f"{metrics['clip_loss']:<12.4f}", end="")
-        if args.use_supervised and 'supervised_loss' in metrics:
-            print(f"{metrics['supervised_loss']:<12.4f}", end="")
-        print()
+        if args.use_supervised:
+            # Supervised mode: show all metrics
+            shuffled_sim = metrics.get('same_class_shuffled_similarity', 0.0)
+            overall_gap = metrics['similarity_gap']  # paired - unpaired
+            in_class_gap = metrics['paired_similarity'] - shuffled_sim if shuffled_sim > 0 else 0.0
+            cross_class_gap = shuffled_sim - metrics['unpaired_similarity'] if shuffled_sim > 0 else 0.0
+            sup_loss = metrics.get('supervised_loss', 0.0)
+            
+            print(f"{base_name:<20} {caption_status:<10} {metrics['paired_similarity']:<10.4f} "
+                  f"{shuffled_sim:<10.4f} {metrics['unpaired_similarity']:<10.4f} "
+                  f"{overall_gap:<10.4f} {in_class_gap:<10.4f} {cross_class_gap:<10.4f} "
+                  f"{metrics['clip_loss']:<10.4f} {sup_loss:<10.4f}")
+        else:
+            # Unsupervised mode: original format
+            print(f"{base_name:<20} {caption_status:<12} {metrics['paired_similarity']:<12.4f} "
+                  f"{metrics['unpaired_similarity']:<12.4f} {metrics['similarity_gap']:<10.4f} "
+                  f"{metrics['clip_loss']:<12.4f}")
     
     # Save results to JSON
     if args.output is not None:
