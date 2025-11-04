@@ -473,6 +473,8 @@ def main():
                         help="Learning rate for optimizer")
     parser.add_argument("--vocab_loss_weight", type=float, default=0.5,
                         help="Weight for K-nearest vocabulary distance loss")
+    parser.add_argument("--vocab_k", type=int, default=5,
+                        help="K for K-nearest vocabulary tokens (5-10 recommended, higher = more flexibility)")
     parser.add_argument("--use_supervised", action="store_true",
                         help="Enable supervised contrastive loss (uses class labels)")
     
@@ -669,7 +671,7 @@ def main():
                 
                 # Vocab distance loss (semantic grounding)
                 learnable_embeds = recaptioner.get_learnable_embeddings(sample_indices, hard=False)
-                vocab_loss = compute_vocab_distance_loss(learnable_embeds, recaptioner.token_embedding_matrix, k=5)
+                vocab_loss = compute_vocab_distance_loss(learnable_embeds, recaptioner.token_embedding_matrix, k=args.vocab_k)
                 
                 # COCO reference loss (optional)
                 # Purpose: Mix COCO image-caption pairs as additional negatives in contrastive batch
@@ -802,6 +804,7 @@ def save_checkpoint(recaptioner, args, num_samples, history, epoch=None, is_fina
         'model': args.model,
         'pretrained': args.pretrained,
         'vocab_loss_weight': args.vocab_loss_weight,
+        'vocab_k': args.vocab_k,
         'use_supervised': args.use_supervised,
         'use_coco_reference': args.use_coco_reference,
         'epoch': epoch if epoch is not None else len(history),
