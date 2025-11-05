@@ -164,7 +164,7 @@ class CLIPSelfRecaptioner(nn.Module):
                 
                 for class_name in class_names:
                     # Tokenize class name (e.g., "dog" -> [1929])
-                    class_tokens = tokenizer.encode(class_name)  # [seq_len]
+                    class_tokens = tokenizer.encode(class_name.replace("_", " "))  # [seq_len]
                     
                     # Get embeddings for content tokens
                     class_embeddings = token_emb[class_tokens]  # [num_class_tokens, D]
