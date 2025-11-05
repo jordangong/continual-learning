@@ -101,6 +101,10 @@ class CLIPSelfRecaptioner(nn.Module):
     Supports two token learning modes:
     - 'embedding': Learn embeddings directly in R^D (continuous, recommended)
     - 'discrete': Learn soft token IDs with Gumbel-Softmax (discrete, experimental)
+    
+    Initialization options (for embedding mode):
+    - init_from_vocab=True: Sample random vocab tokens (better semantic bootstrap)
+    - init_from_vocab=False: Sample from Gaussian noise (original method)
     """
     
     def __init__(
@@ -114,6 +118,7 @@ class CLIPSelfRecaptioner(nn.Module):
         gumbel_temperature: float = 1.0,
         vocab_size: int = 49408,
         dtype: Optional[torch.dtype] = None,  # Training precision (bf16/fp16/fp32)
+        init_from_vocab: bool = True,  # Initialize from random vocab tokens (vs Gaussian)
     ):
         super().__init__()
         
@@ -129,6 +134,7 @@ class CLIPSelfRecaptioner(nn.Module):
         self.gumbel_temperature = gumbel_temperature
         self.vocab_size = vocab_size
         self.dtype = dtype if dtype is not None else torch.float32
+        self.init_from_vocab = init_from_vocab
         
         # Get dimensions from OpenCLIP model
         self.embed_dim = clip_model.transformer.width
@@ -143,29 +149,48 @@ class CLIPSelfRecaptioner(nn.Module):
             # Option A: Reparameterized embeddings (direction × scale)
             # This decouples direction learning from magnitude, ensuring stable norms
             
-            # Initialize directions from token embedding distribution
-            token_mean = token_emb.mean(dim=0, keepdim=True)  # [1, D]
-            token_std = token_emb.std(dim=0, keepdim=True)    # [1, D]
-            init_directions = token_mean + token_std * torch.randn(
-                num_samples, num_learnable_tokens, self.embed_dim, device=device
-            )
-            # Normalize to unit sphere (L2 norm = 1)
-            init_directions = F.normalize(init_directions, dim=-1)
+            if init_from_vocab:
+                # Initialize from randomly sampled real token embeddings
+                # This provides better semantic bootstrap than Gaussian noise
+                total_tokens_needed = num_samples * num_learnable_tokens
+                
+                # Randomly sample token indices (with replacement)
+                sampled_indices = torch.randint(
+                    0, vocab_size, (total_tokens_needed,), device=device
+                )
+                
+                # Get sampled token embeddings: [total_tokens_needed, embed_dim]
+                sampled_embeddings = token_emb[sampled_indices]
+                
+                # Reshape to [num_samples, num_learnable_tokens, embed_dim]
+                sampled_embeddings = sampled_embeddings.view(
+                    num_samples, num_learnable_tokens, self.embed_dim
+                )
+                
+                # Extract directions (unit vectors) and scales (norms)
+                init_scales = torch.norm(sampled_embeddings, dim=-1, keepdim=True)  # [N, T, 1]
+                init_directions = F.normalize(sampled_embeddings, dim=-1)  # [N, T, D]
+            else:
+                # Initialize from Gaussian noise (original method)
+                # Sample from token embedding distribution
+                token_mean = token_emb.mean(dim=0, keepdim=True)  # [1, D]
+                token_std = token_emb.std(dim=0, keepdim=True)    # [1, D]
+                init_embeddings = token_mean + token_std * torch.randn(
+                    num_samples, num_learnable_tokens, self.embed_dim, device=device
+                )
+                
+                # Extract directions (unit vectors) and scales (norms)
+                init_scales = torch.norm(init_embeddings, dim=-1, keepdim=True)  # [N, T, 1]
+                init_directions = F.normalize(init_embeddings, dim=-1)  # [N, T, D]
             
-            # Initialize scales to match average token norm
-            token_norms = torch.norm(token_emb, dim=1)  # [vocab_size]
+            # Store average token norm for reference
+            token_norms = torch.norm(token_emb, dim=1)
             avg_token_norm = token_norms.mean()
-            init_scales = torch.full(
-                (num_samples, num_learnable_tokens, 1),
-                avg_token_norm.item(),
-                device=device
-            )
+            self.register_buffer("avg_token_norm", avg_token_norm)
             
             # Learnable parameters: directions (unit norm) and scales
             self.learnable_directions = nn.Parameter(init_directions.to(dtype=self.dtype))
             self.learnable_scales = nn.Parameter(init_scales.to(dtype=self.dtype))
-            # Store reference norm for monitoring
-            self.register_buffer("avg_token_norm", avg_token_norm)
         elif token_mode == "discrete":
             # Option B: Learn soft token IDs (logits over vocabulary)
             # Initialize logits with small noise (uniform over vocab initially)
@@ -479,6 +504,10 @@ def main():
                         help="Number of learnable tokens per sample")
     parser.add_argument("--gumbel_temperature", type=float, default=1.0,
                         help="Gumbel-Softmax temperature for discrete mode (lower = more discrete)")
+    parser.add_argument("--init_from_vocab", action="store_true", default=True,
+                        help="Initialize learnable tokens from random vocab embeddings (better semantic bootstrap)")
+    parser.add_argument("--no_init_from_vocab", dest="init_from_vocab", action="store_false",
+                        help="Initialize learnable tokens from Gaussian noise (original method)")
     
     # Training
     parser.add_argument("--epochs", type=int, default=5,
@@ -590,7 +619,8 @@ def main():
     )
     
     # Create recaptioner
-    print(f"\nInitializing with {args.num_tokens} learnable tokens per sample (mode: {args.token_mode})")
+    init_method = "vocab sampling" if args.init_from_vocab else "Gaussian noise"
+    print(f"\nInitializing with {args.num_tokens} learnable tokens per sample (mode: {args.token_mode}, init: {init_method})")
     recaptioner = CLIPSelfRecaptioner(
         clip_model=clip_model,
         tokenizer=tokenizer,
@@ -600,6 +630,7 @@ def main():
         token_mode=args.token_mode,
         gumbel_temperature=args.gumbel_temperature,
         dtype=amp_dtype if args.use_amp else None,  # Match training precision
+        init_from_vocab=args.init_from_vocab,
     )
     
     # Count learnable parameters
