@@ -163,20 +163,11 @@ class CLIPSelfRecaptioner(nn.Module):
                 init_embeddings_list = []
                 
                 for class_name in class_names:
-                    # Tokenize class name (e.g., "dog" -> [49406, 1929, 49407])
-                    class_tokens = tokenizer([class_name]).squeeze(0)  # [seq_len]
-                    
-                    # Remove SOS/EOS tokens, keep only content tokens
-                    # SOS is first token (49406), EOS is last token (49407)
-                    content_tokens = class_tokens[1:-1]  # Remove SOS and EOS
-                    
-                    # Handle empty class names
-                    if len(content_tokens) == 0:
-                        # Fallback to random vocab tokens
-                        content_tokens = torch.randint(0, vocab_size, (1,), device=device)
+                    # Tokenize class name (e.g., "dog" -> [1929])
+                    class_tokens = tokenizer.encode(class_name)  # [seq_len]
                     
                     # Get embeddings for content tokens
-                    class_embeddings = token_emb[content_tokens]  # [num_class_tokens, D]
+                    class_embeddings = token_emb[class_tokens]  # [num_class_tokens, D]
                     
                     # Truncate or repeat to match num_learnable_tokens
                     if len(class_embeddings) >= num_learnable_tokens:
