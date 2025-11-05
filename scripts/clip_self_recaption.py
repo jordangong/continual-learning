@@ -103,8 +103,9 @@ class CLIPSelfRecaptioner(nn.Module):
     - 'discrete': Learn soft token IDs with Gumbel-Softmax (discrete, experimental)
     
     Initialization options (for embedding mode):
-    - init_from_vocab=True: Sample random vocab tokens (better semantic bootstrap)
-    - init_from_vocab=False: Sample from Gaussian noise (original method)
+    - init_method="class_name": Initialize from class name tokens (best semantic grounding)
+    - init_method="vocab": Sample random vocab tokens (good semantic bootstrap)
+    - init_method="gaussian": Sample from Gaussian noise (original method)
     """
     
     def __init__(
@@ -118,7 +119,8 @@ class CLIPSelfRecaptioner(nn.Module):
         gumbel_temperature: float = 1.0,
         vocab_size: int = 49408,
         dtype: Optional[torch.dtype] = None,  # Training precision (bf16/fp16/fp32)
-        init_from_vocab: bool = True,  # Initialize from random vocab tokens (vs Gaussian)
+        init_method: str = "class_name",  # 'class_name', 'vocab', or 'gaussian'
+        class_names: Optional[list] = None,  # Required for init_method='class_name'
     ):
         super().__init__()
         
@@ -134,7 +136,13 @@ class CLIPSelfRecaptioner(nn.Module):
         self.gumbel_temperature = gumbel_temperature
         self.vocab_size = vocab_size
         self.dtype = dtype if dtype is not None else torch.float32
-        self.init_from_vocab = init_from_vocab
+        self.init_method = init_method
+        
+        # Validate class_names if needed
+        if init_method == "class_name" and class_names is None:
+            raise ValueError("class_names must be provided when init_method='class_name'")
+        if init_method == "class_name" and len(class_names) != num_samples:
+            raise ValueError(f"len(class_names)={len(class_names)} must match num_samples={num_samples}")
         
         # Get dimensions from OpenCLIP model
         self.embed_dim = clip_model.transformer.width
@@ -149,7 +157,46 @@ class CLIPSelfRecaptioner(nn.Module):
             # Option A: Reparameterized embeddings (direction × scale)
             # This decouples direction learning from magnitude, ensuring stable norms
             
-            if init_from_vocab:
+            if init_method == "class_name":
+                # Initialize from class name token embeddings (best semantic grounding)
+                # Each sample's tokens initialized from its class name
+                init_embeddings_list = []
+                
+                for class_name in class_names:
+                    # Tokenize class name (e.g., "dog" -> [49406, 1929, 49407])
+                    class_tokens = tokenizer([class_name]).squeeze(0)  # [seq_len]
+                    
+                    # Remove SOS/EOS tokens, keep only content tokens
+                    # SOS is first token (49406), EOS is last token (49407)
+                    content_tokens = class_tokens[1:-1]  # Remove SOS and EOS
+                    
+                    # Handle empty class names
+                    if len(content_tokens) == 0:
+                        # Fallback to random vocab tokens
+                        content_tokens = torch.randint(0, vocab_size, (1,), device=device)
+                    
+                    # Get embeddings for content tokens
+                    class_embeddings = token_emb[content_tokens]  # [num_class_tokens, D]
+                    
+                    # Truncate or repeat to match num_learnable_tokens
+                    if len(class_embeddings) >= num_learnable_tokens:
+                        # Truncate: take first N tokens
+                        sample_embeddings = class_embeddings[:num_learnable_tokens]
+                    else:
+                        # Repeat: cycle through tokens
+                        repeats = (num_learnable_tokens + len(class_embeddings) - 1) // len(class_embeddings)
+                        sample_embeddings = class_embeddings.repeat(repeats, 1)[:num_learnable_tokens]
+                    
+                    init_embeddings_list.append(sample_embeddings)
+                
+                # Stack all samples: [num_samples, num_learnable_tokens, embed_dim]
+                init_embeddings = torch.stack(init_embeddings_list, dim=0)
+                
+                # Extract directions (unit vectors) and scales (norms)
+                init_scales = torch.norm(init_embeddings, dim=-1, keepdim=True)  # [N, T, 1]
+                init_directions = F.normalize(init_embeddings, dim=-1)  # [N, T, D]
+                
+            elif init_method == "vocab":
                 # Initialize from randomly sampled real token embeddings
                 # This provides better semantic bootstrap than Gaussian noise
                 total_tokens_needed = num_samples * num_learnable_tokens
@@ -170,7 +217,8 @@ class CLIPSelfRecaptioner(nn.Module):
                 # Extract directions (unit vectors) and scales (norms)
                 init_scales = torch.norm(sampled_embeddings, dim=-1, keepdim=True)  # [N, T, 1]
                 init_directions = F.normalize(sampled_embeddings, dim=-1)  # [N, T, D]
-            else:
+                
+            elif init_method == "gaussian":
                 # Initialize from Gaussian noise (original method)
                 # Sample from token embedding distribution
                 token_mean = token_emb.mean(dim=0, keepdim=True)  # [1, D]
@@ -182,6 +230,8 @@ class CLIPSelfRecaptioner(nn.Module):
                 # Extract directions (unit vectors) and scales (norms)
                 init_scales = torch.norm(init_embeddings, dim=-1, keepdim=True)  # [N, T, 1]
                 init_directions = F.normalize(init_embeddings, dim=-1)  # [N, T, D]
+            else:
+                raise ValueError(f"Unknown init_method: {init_method}. Use 'class_name', 'vocab', or 'gaussian'")
             
             # Store average token norm for reference
             token_norms = torch.norm(token_emb, dim=1)
@@ -504,10 +554,9 @@ def main():
                         help="Number of learnable tokens per sample")
     parser.add_argument("--gumbel_temperature", type=float, default=1.0,
                         help="Gumbel-Softmax temperature for discrete mode (lower = more discrete)")
-    parser.add_argument("--init_from_vocab", action="store_true", default=True,
-                        help="Initialize learnable tokens from random vocab embeddings (better semantic bootstrap)")
-    parser.add_argument("--no_init_from_vocab", dest="init_from_vocab", action="store_false",
-                        help="Initialize learnable tokens from Gaussian noise (original method)")
+    parser.add_argument("--init_method", type=str, default="class_name",
+                        choices=["class_name", "vocab", "gaussian"],
+                        help="Initialization method: 'class_name' (from class names), 'vocab' (random tokens), 'gaussian' (noise)")
     
     # Training
     parser.add_argument("--epochs", type=int, default=5,
@@ -618,9 +667,63 @@ def main():
         pin_memory=True,
     )
     
+    # Create per-sample class names list for initialization
+    # class_names is a mapping {label_id: name}, we need [name_for_sample_0, name_for_sample_1, ...]
+    if args.init_method == "class_name":
+        print(f"\nBuilding per-sample class names for {num_samples} samples...")
+        
+        # Fast label extraction (avoid loading images)
+        dataset_to_check = dataset
+        subset_indices = None
+        
+        # Handle Subset wrapper
+        if hasattr(dataset, "dataset") and hasattr(dataset, "indices"):
+            dataset_to_check = dataset.dataset
+            subset_indices = dataset.indices
+            print("Detected Subset wrapper, accessing underlying dataset")
+        
+        # Try different fast access methods
+        targets_list = None
+        if hasattr(dataset_to_check, "targets"):
+            # CIFAR, MNIST, etc.
+            targets_list = dataset_to_check.targets
+            if isinstance(targets_list, torch.Tensor):
+                targets_list = targets_list.tolist()
+            if subset_indices is not None:
+                targets_list = [targets_list[i] for i in subset_indices]
+            print("Using dataset.targets for fast indexing")
+        elif hasattr(dataset_to_check, "samples"):
+            # ImageFolder datasets
+            targets_list = [s[1] for s in dataset_to_check.samples]
+            if subset_indices is not None:
+                targets_list = [targets_list[i] for i in subset_indices]
+            print("Using dataset.samples for fast indexing")
+        elif hasattr(dataset_to_check, "_samples"):
+            # Stanford Cars
+            targets_list = [s[1] for s in dataset_to_check._samples]
+            if subset_indices is not None:
+                targets_list = [targets_list[i] for i in subset_indices]
+            print("Using dataset._samples for fast indexing")
+        elif hasattr(dataset_to_check, "_labels"):
+            # FGVC Aircraft, Food101, Oxford Pet
+            targets_list = dataset_to_check._labels
+            if isinstance(targets_list, torch.Tensor):
+                targets_list = targets_list.tolist()
+            if subset_indices is not None:
+                targets_list = [targets_list[i] for i in subset_indices]
+            print("Using dataset._labels for fast indexing")
+        else:
+            # Fallback: slow method (load dataset items)
+            print("No fast target access found, loading dataset items (slower)...")
+            targets_list = [dataset[i][1] for i in range(num_samples)]
+        
+        # Map labels to class names
+        sample_class_names = [class_names[label] for label in targets_list]
+    else:
+        sample_class_names = None  # Not needed for other init methods
+    
     # Create recaptioner
-    init_method = "vocab sampling" if args.init_from_vocab else "Gaussian noise"
-    print(f"\nInitializing with {args.num_tokens} learnable tokens per sample (mode: {args.token_mode}, init: {init_method})")
+    print(f"\nInitializing with {args.num_tokens} learnable tokens per sample (mode: {args.token_mode}, init: {args.init_method})")
     recaptioner = CLIPSelfRecaptioner(
         clip_model=clip_model,
         tokenizer=tokenizer,
@@ -630,7 +733,8 @@ def main():
         token_mode=args.token_mode,
         gumbel_temperature=args.gumbel_temperature,
         dtype=amp_dtype if args.use_amp else None,  # Match training precision
-        init_from_vocab=args.init_from_vocab,
+        init_method=args.init_method,
+        class_names=sample_class_names,  # Per-sample class names
     )
     
     # Count learnable parameters
