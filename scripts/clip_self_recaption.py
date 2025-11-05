@@ -310,16 +310,32 @@ class CLIPSelfRecaptioner(nn.Module):
 
 def compute_vocab_distance_loss(learnable_embeds: torch.Tensor, token_matrix: torch.Tensor, k: int = 5):
     """
-    K-nearest vocab distance for semantic grounding.
+    K-nearest vocab distance for semantic grounding using cosine distance.
+    
+    Uses cosine distance (1 - cosine_similarity) to measure semantic difference
+    while being invariant to magnitude. This allows learnable scales to remain
+    stable without being penalized by the vocab loss.
     
     Args:
         learnable_embeds: [batch, num_tokens, embed_dim] learnable embeddings
         token_matrix: [vocab_size, embed_dim] vocabulary embeddings
         k: Number of nearest neighbors
     """
-    tokens_flat = learnable_embeds.reshape(-1, learnable_embeds.shape[-1])
-    distances = torch.cdist(tokens_flat.unsqueeze(0), token_matrix.unsqueeze(0)).squeeze(0)
-    topk_distances, _ = distances.topk(k, dim=1, largest=False)
+    tokens_flat = learnable_embeds.reshape(-1, learnable_embeds.shape[-1])  # [N, D]
+    
+    # Normalize for cosine similarity
+    tokens_norm = F.normalize(tokens_flat, dim=-1)  # [N, D]
+    vocab_norm = F.normalize(token_matrix, dim=-1)  # [vocab_size, D]
+    
+    # Compute cosine similarity: [N, vocab_size]
+    cosine_sim = torch.matmul(tokens_norm, vocab_norm.t())
+    
+    # Convert to cosine distance: [N, vocab_size]
+    cosine_dist = 1.0 - cosine_sim
+    
+    # Get k-nearest neighbors (smallest distances)
+    topk_distances, _ = cosine_dist.topk(k, dim=1, largest=False)
+    
     return topk_distances.mean()
 
 
