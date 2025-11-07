@@ -405,6 +405,54 @@ def compute_vocab_distance_loss(learnable_embeds: torch.Tensor, token_matrix: to
     return topk_distances.mean()
 
 
+def compute_same_class_shuffled_similarity(
+    image_features: torch.Tensor,
+    text_features: torch.Tensor,
+    labels: torch.Tensor,
+) -> float:
+    """
+    Compute mean cosine similarity for same-class but shuffled pairs.
+    
+    For each image, pair it with a random caption from the same class (not itself).
+    This metric helps detect overfitting:
+    - Should be lower than paired similarity (not exact match)
+    - Should be higher than unpaired similarity (same class)
+    - Cross-class gap (shuffled-unpaired) indicates generalization
+    
+    Args:
+        image_features: [N, D] normalized image features
+        text_features: [N, D] normalized text features
+        labels: [N] class labels
+    
+    Returns:
+        Mean cosine similarity for same-class shuffled pairs
+    """
+    unique_labels = labels.unique()
+    
+    similarities = []
+    
+    for label in unique_labels:
+        # Get all indices for this class
+        class_mask = labels == label
+        class_indices = torch.where(class_mask)[0]
+        
+        # Skip if only one sample in class
+        if len(class_indices) <= 1:
+            continue
+        
+        # For each sample in this class, pair with random other sample from same class
+        for idx in class_indices:
+            # Sample another index from same class (excluding itself)
+            other_indices = class_indices[class_indices != idx]
+            shuffled_idx = other_indices[torch.randint(0, len(other_indices), (1,))].item()
+            
+            # Compute similarity between image and shuffled same-class text
+            sim = (image_features[idx] * text_features[shuffled_idx]).sum().item()
+            similarities.append(sim)
+    
+    return sum(similarities) / len(similarities) if similarities else 0.0
+
+
 class COCOCaptionWrapper(Dataset):
     """Wrapper for COCO Captions that returns a single caption per image."""
     def __init__(self, coco_dataset, max_samples: Optional[int] = None, random_caption: bool = False):
@@ -885,16 +933,72 @@ def main():
         avg_vocab = total_vocab_loss / num_batches
         avg_coco = total_coco_loss / num_batches
         
+        # Compute overfitting metrics (cross-class gap)
+        # Extract all features for metric computation
+        print("\nComputing overfitting metrics...")
+        all_image_features = []
+        all_text_features = []
+        all_labels = []
+        
+        recaptioner.eval()
+        with torch.no_grad():
+            for images, labels_batch, class_names_batch, sample_indices in dataloader:
+                images = images.to(device)
+                labels_batch = labels_batch.to(device)
+                sample_indices = sample_indices.to(device)
+                
+                image_features, text_features = recaptioner(images, class_names_batch, sample_indices)
+                
+                all_image_features.append(image_features)
+                all_text_features.append(text_features)
+                all_labels.append(labels_batch)
+        
+        all_image_features = torch.cat(all_image_features, dim=0)
+        all_text_features = torch.cat(all_text_features, dim=0)
+        all_labels = torch.cat(all_labels, dim=0)
+        
+        # Compute metrics
+        paired_similarity = (all_image_features * all_text_features).sum(dim=1).mean().item()
+        
+        # Random unpaired similarity (sample 1000 random pairs)
+        num_samples = min(1000, len(all_image_features))
+        rand_indices = torch.randperm(len(all_image_features))[:num_samples]
+        rand_text_indices = torch.randperm(len(all_text_features))[:num_samples]
+        unpaired_similarity = (all_image_features[rand_indices] * all_text_features[rand_text_indices]).sum(dim=1).mean().item()
+        
+        # Same-class shuffled similarity
+        same_class_shuffled_similarity = compute_same_class_shuffled_similarity(
+            all_image_features, all_text_features, all_labels
+        )
+        
+        # Compute gaps
+        overall_gap = paired_similarity - unpaired_similarity
+        in_class_gap = paired_similarity - same_class_shuffled_similarity
+        cross_class_gap = same_class_shuffled_similarity - unpaired_similarity
+        
+        recaptioner.train()
+        
         print(f"\nEpoch {epoch+1}/{args.epochs} Summary:")
+        print("\n  Loss Metrics:")
         if args.use_supervised:
-            print(f"  CLIP Loss (Supervised, optimizing): {avg_supervised_clip:.4f}")
-            print(f"  CLIP Loss (Unsupervised, monitoring): {avg_unsupervised_clip:.4f}")
+            print(f"    CLIP Loss (Supervised, optimizing):   {avg_supervised_clip:.4f}")
+            print(f"    CLIP Loss (Unsupervised, monitoring): {avg_unsupervised_clip:.4f}")
         else:
-            print(f"  CLIP Loss (Unsupervised, optimizing): {avg_unsupervised_clip:.4f}")
-            print(f"  CLIP Loss (Supervised, monitoring): {avg_supervised_clip:.4f}")
-        print(f"  Vocab Loss: {avg_vocab:.4f}")
+            print(f"    CLIP Loss (Unsupervised, optimizing): {avg_unsupervised_clip:.4f}")
+            print(f"    CLIP Loss (Supervised, monitoring):   {avg_supervised_clip:.4f}")
+        print(f"    Vocab Loss: {avg_vocab:.4f}")
         if args.use_coco_reference:
-            print(f"  COCO Loss: {avg_coco:.4f}")
+            print(f"    COCO Loss: {avg_coco:.4f}")
+        
+        print("\n  Similarity Metrics:")
+        print(f"    Paired similarity:                   {paired_similarity:.4f}")
+        print(f"    Same-class shuffled similarity:      {same_class_shuffled_similarity:.4f}")
+        print(f"    Unpaired similarity:                 {unpaired_similarity:.4f}")
+        
+        print("\n  Gap Metrics (Overfitting Detection):")
+        print(f"    Overall gap (paired-unpaired):       {overall_gap:.4f}")
+        print(f"    In-class gap (paired-shuffled):      {in_class_gap:.4f}")
+        print(f"    Cross-class gap (shuffled-unpaired): {cross_class_gap:.4f} <- overfitting indicator")
         
         # Save to history
         epoch_data = {
@@ -904,6 +1008,14 @@ def main():
             'unsupervised_clip_loss': avg_unsupervised_clip,
             'vocab_loss': avg_vocab,
             'coco_loss': avg_coco,
+            # Similarity metrics
+            'paired_similarity': paired_similarity,
+            'same_class_shuffled_similarity': same_class_shuffled_similarity,
+            'unpaired_similarity': unpaired_similarity,
+            # Gap metrics for overfitting detection
+            'overall_gap': overall_gap,
+            'in_class_gap': in_class_gap,
+            'cross_class_gap': cross_class_gap,
         }
         history.append(epoch_data)
         
