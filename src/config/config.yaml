@@ -97,6 +97,16 @@ continual:
       normal_std: 0.02           # Standard deviation for normal initialization
       uniform_range: [-0.1, 0.1] # Range for uniform initialization [min, max]
 
+  # CoOp (Context Optimization) parameters for CLIP text prompt tuning (used when strategy is "coop")
+  coop:
+    n_ctx: 16                    # Number of learnable context tokens (default: 16)
+    ctx_init: null               # Optional initialization string (e.g., "a photo of a", null for random)
+    ctx_position: "front"        # Position of class token: "end", "middle", or "front"
+                                 # - "end": [SOS] [CLASS] [CTX_1] ... [CTX_n] [EOS]
+                                 # - "middle": [SOS] [CTX_1...n/2] [CLASS] [CTX_n/2+1...n] [EOS]
+                                 # - "front": [SOS] [CTX_1] ... [CTX_n] [CLASS] [EOS]
+    class_specific: false        # Use class-specific context vectors (more parameters)
+
   # LoRA (Low-Rank Adaptation) parameters (used when strategy is "lora")
   lora:
     rank: 8                      # Rank of LoRA matrices (r in the paper)

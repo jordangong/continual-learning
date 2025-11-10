@@ -18,6 +18,7 @@ from .vit_prompt_tuning import create_vit_prompted_model
 from .lora import create_lora_model
 from .adapter import create_adapter_model
 from .projection import create_projection_model
+from .clip_text_prompt_tuning import create_clip_text_prompted_model
 
 
 class CLIPTextEncoderWrapper(nn.Module):
@@ -1397,10 +1398,11 @@ class PretrainedModel(nn.Module):
             class_names: List of class names
             class_indices: Optional list of class indices (for incremental updates)
         """
-        if isinstance(self.classifier, CLIPClassifier):
+        # Check if classifier has set_class_names method (handles both CLIPClassifier and wrappers like CoOp)
+        if hasattr(self.classifier, 'set_class_names'):
             self.classifier.set_class_names(class_names, class_indices)
         else:
-            print("Warning: set_class_names called on non-CLIP classifier")
+            print("Warning: set_class_names called on classifier without set_class_names method")
 
     def update_prototypes(self, features: torch.Tensor, labels: torch.Tensor) -> None:
         """Update prototypes if using prototypical classifier."""
@@ -1561,6 +1563,26 @@ def create_model(
             prompt_config=continual_config.get("prompt_tuning", {}),
             embed_dim=model.feature_dim,
             num_classes=num_classes,
+        )
+    
+    # Add CoOp (CLIP text prompt tuning) if configured
+    elif continual_config.get("strategy", "") == "coop":
+        # Check if this is a CLIP model with text encoder
+        if not (
+            model_config["source"] == "openclip" and 
+            hasattr(model, "classifier") and
+            hasattr(model.classifier, "text_encoder") and
+            isinstance(model.classifier.text_encoder, CLIPTextEncoderWrapper)
+        ):
+            raise ValueError(
+                "CoOp (Context Optimization) is only supported for CLIP models with text encoder. "
+                "Please use source='openclip' and classifier.type='clip_text'"
+            )
+        
+        print("\nApplying CoOp (CLIP text prompt tuning)...")
+        model = create_clip_text_prompted_model(
+            base_model=model,
+            coop_config=continual_config.get("coop", {}),
         )
     
     # Add LoRA if configured
