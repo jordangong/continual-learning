@@ -339,7 +339,6 @@ class ViTPromptedModel(nn.Module):
             output logits [batch_size, num_classes]
         """
         x = self.forward_features(x)
-        x = self.forward_head(x)
         x = self.base_model.classifier(x)
 
         return x
@@ -400,6 +399,11 @@ class ViTPromptedModel(nn.Module):
             x = self.base_model.backbone.blocks(x)
         x = self.base_model.backbone.norm(x)
 
+        x = self.pool(x, pool_type="prompt_avg" if self.omit_cls_token else None)
+        x = self.base_model.backbone.fc_norm(x)
+        x = self.base_model.backbone.head_drop(x)
+        x = self.base_model.backbone.head(x)
+
         return x
 
     def pool(self, x: torch.Tensor, pool_type: Optional[str] = None) -> torch.Tensor:
@@ -416,12 +420,6 @@ class ViTPromptedModel(nn.Module):
             num_prompt_tokens=self.num_prompt_tokens,
         )
         return x
-
-    def forward_head(self, x: torch.Tensor, pre_logits: bool = False) -> torch.Tensor:
-        x = self.pool(x, pool_type="prompt_avg" if self.omit_cls_token else None)
-        x = self.base_model.backbone.fc_norm(x)
-        x = self.base_model.backbone.head_drop(x)
-        return x if pre_logits else self.base_model.backbone.head(x)
 
     def reset_frequency_tracking(self):
         """
