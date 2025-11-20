@@ -284,6 +284,10 @@ def run_training(
 
                 model_to_use.eval()
 
+                # If model is wrapped with LoRA or Prompt Tuning, extract features from base model
+                if hasattr(model_to_use, "base_model"):
+                    model_to_use = model_to_use.base_model
+
                 data_iter = tqdm(temp_loader, desc="Extracting features for prototypes")
                 with torch.no_grad():
                     for batch in data_iter:
