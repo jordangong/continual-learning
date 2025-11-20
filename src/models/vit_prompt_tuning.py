@@ -431,6 +431,14 @@ class ViTPromptedModel(nn.Module):
         if hasattr(self, "prompt_pool") and self.prompt_pool is not None:
             self.prompt_pool.reset_frequency_tracking()
 
+    # Forward common methods to base model
+    def __getattr__(self, name: str):
+        """Forward attribute access to base model if not found in ViTPromptedModel."""
+        try:
+            return super().__getattr__(name)
+        except AttributeError:
+            return getattr(self.base_model, name)
+
 
 def create_vit_prompted_model(
     base_model: nn.Module,
