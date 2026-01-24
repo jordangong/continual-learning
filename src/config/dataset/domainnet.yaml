@@ -5,9 +5,22 @@ apply_moment_matching: false
 mean: [0.485, 0.456, 0.406]  # ImageNet mean
 std: [0.229, 0.224, 0.225]  # ImageNet std
 num_classes: 345  # DomainNet has 345 classes
-mode: class  # "class" for class-incremental, "domain" for domain-incremental
+mode: class  # "class" for class-incremental, "domain" for domain-incremental, "cross_domain" for cross-domain class-incremental
 # domains: null  # Optional, specify domains to use (default: all domains)
 # Available domains: ["clipart", "infograph", "painting", "quickdraw", "real", "sketch"]
+# 
+# Mode descriptions:
+# - "class": All domains used, classes split across steps (standard class-incremental)
+# - "domain": All classes used, domains split across steps (domain-incremental)
+# - "cross_domain": Each step = one domain with disjoint classes (cross-domain class-incremental)
+#   Example with 6 domains (6 steps, ~57 classes per step):
+#   - Step 1 (clipart): Classes 0-57
+#   - Step 2 (infograph): Classes 58-114
+#   - Step 3 (painting): Classes 115-171
+#   - Step 4 (quickdraw): Classes 172-228
+#   - Step 5 (real): Classes 229-285
+#   - Step 6 (sketch): Classes 286-344
+#   Note: For cross_domain mode, num_steps must equal number of domains (6 by default)
 augmentation:
   random_resized_crop: true
   random_resized_crop_scale: [0.08, 1.0]

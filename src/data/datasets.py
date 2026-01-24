@@ -51,7 +51,9 @@ class ContinualDataset:
         self.root = root
         self.num_steps = num_steps
         self.classes_per_step = classes_per_step
-        self.first_step_classes = first_step_classes if first_step_classes is not None else classes_per_step
+        self.first_step_classes = (
+            first_step_classes if first_step_classes is not None else classes_per_step
+        )
         self.transform = transform
         self.test_transform = (
             test_transform if test_transform is not None else transform
@@ -87,7 +89,7 @@ class ContinualDataset:
         """
         Wrap the original train and test datasets with captions.
         MUST be called BEFORE get_data_loaders to ensure caption indices match.
-        
+
         Args:
             caption_dir: Directory containing caption JSON files
             dataset_name: Name of the dataset (e.g., "cifar100", "imagenet-r")
@@ -95,7 +97,7 @@ class ContinualDataset:
             seed: Random seed for caption sampling
         """
         from src.data.caption_dataset import create_caption_dataset
-        
+
         # Wrap train dataset
         train_caption_dataset = create_caption_dataset(
             base_dataset=self.dataset_train,
@@ -108,7 +110,7 @@ class ContinualDataset:
         if train_caption_dataset is not None:
             self.dataset_train = train_caption_dataset
             print("Wrapped train dataset with captions BEFORE subsetting")
-        
+
         # Wrap test dataset
         test_caption_dataset = create_caption_dataset(
             base_dataset=self.dataset_test,
@@ -121,7 +123,7 @@ class ContinualDataset:
         if test_caption_dataset is not None:
             self.dataset_test = test_caption_dataset
             print("Wrapped test dataset with captions BEFORE subsetting")
-    
+
     def setup(self):
         """Setup the dataset. Should be implemented by child classes."""
         raise NotImplementedError
@@ -280,10 +282,10 @@ class ContinualDataset:
             # Create a defaultdict to store indices by class
             class_indices = defaultdict(list)
             dataset_size = len(dataset)
-            
+
             # Try to access targets directly without loading images for speed
             targets_list = None
-            
+
             # Handle Subset wrapper (common in continual learning datasets)
             dataset_to_check = dataset
             subset_indices = None
@@ -292,7 +294,7 @@ class ContinualDataset:
                 dataset_to_check = dataset.dataset
                 subset_indices = dataset.indices
                 print("Detected Subset wrapper, accessing underlying dataset")
-            
+
             if hasattr(dataset_to_check, "targets"):
                 # Many torchvision datasets have a targets attribute (CIFAR, MNIST, etc.)
                 targets_list = dataset_to_check.targets
@@ -326,7 +328,7 @@ class ContinualDataset:
                 (i, min(i + chunk_size, dataset_size))
                 for i in range(0, dataset_size, chunk_size)
             ]
-            
+
             # Function to process a chunk of the dataset with progress bar
             def process_chunk(chunk_id, start_idx, end_idx):
                 chunk_indices = defaultdict(list)
@@ -352,10 +354,12 @@ class ContinualDataset:
 
             # Process chunks in parallel with progress bars
             with ThreadPoolExecutor(max_workers=num_workers) as executor:
-                chunk_results = list(executor.map(
-                    lambda x: process_chunk(x[0], x[1][0], x[1][1]),
-                    enumerate(chunks)
-                ))
+                chunk_results = list(
+                    executor.map(
+                        lambda x: process_chunk(x[0], x[1][0], x[1][1]),
+                        enumerate(chunks),
+                    )
+                )
 
             # Merge results from all chunks
             for chunk_result in chunk_results:
@@ -622,11 +626,15 @@ class CUB200CL(ContinualDataset):
                 parts = line.strip().split()
                 if len(parts) >= 2:
                     # Remove the numeric prefix (e.g., "001.") from class name
-                    class_name = parts[1].split('.', 1)[1] if '.' in parts[1] else parts[1]
+                    class_name = (
+                        parts[1].split(".", 1)[1] if "." in parts[1] else parts[1]
+                    )
                     self.classes.append(class_name)
 
         # Create class_to_idx mapping
-        self.class_to_idx = {class_name: idx for idx, class_name in enumerate(self.classes)}
+        self.class_to_idx = {
+            class_name: idx for idx, class_name in enumerate(self.classes)
+        }
 
         # Setup train/test split (use the standard split from the dataset)
         images_path = os.path.join(dataset_path, "images")
@@ -1032,57 +1040,63 @@ class FGVCAircraftCL(ContinualDataset):
     def _build_variant_to_manufacturer_mapping(self):
         """Build mapping from variant names to manufacturer names using annotation files."""
         variant_to_manufacturer = {}
-        
+
         # Read all annotation files to build complete mapping
         data_dir = os.path.join(self.root, "fgvc-aircraft-2013b", "data")
         splits = ["train", "val", "test", "trainval"]
-        
+
         for split in splits:
             variant_file = os.path.join(data_dir, f"images_variant_{split}.txt")
-            manufacturer_file = os.path.join(data_dir, f"images_manufacturer_{split}.txt")
-            
-            if not os.path.exists(variant_file) or not os.path.exists(manufacturer_file):
+            manufacturer_file = os.path.join(
+                data_dir, f"images_manufacturer_{split}.txt"
+            )
+
+            if not os.path.exists(variant_file) or not os.path.exists(
+                manufacturer_file
+            ):
                 continue
-            
+
             # Read variant annotations
-            with open(variant_file, 'r') as f:
+            with open(variant_file, "r") as f:
                 variant_lines = f.readlines()
-            
+
             # Read manufacturer annotations
-            with open(manufacturer_file, 'r') as f:
+            with open(manufacturer_file, "r") as f:
                 manufacturer_lines = f.readlines()
-            
+
             # Build mapping
-            for variant_line, manufacturer_line in zip(variant_lines, manufacturer_lines):
-                variant_parts = variant_line.strip().split(' ', 1)
-                manufacturer_parts = manufacturer_line.strip().split(' ', 1)
-                
+            for variant_line, manufacturer_line in zip(
+                variant_lines, manufacturer_lines
+            ):
+                variant_parts = variant_line.strip().split(" ", 1)
+                manufacturer_parts = manufacturer_line.strip().split(" ", 1)
+
                 if len(variant_parts) == 2 and len(manufacturer_parts) == 2:
                     variant = variant_parts[1]
                     manufacturer = manufacturer_parts[1]
-                    
+
                     # Only store if we don't have this variant yet
                     if variant not in variant_to_manufacturer:
                         variant_to_manufacturer[variant] = manufacturer
-        
+
         return variant_to_manufacturer
-    
+
     def _enhance_class_names_with_manufacturer(self):
         """Enhance variant class names by adding manufacturer info where missing."""
         if self.annotation_level != "variant":
             # Only apply to variant annotation level
             return
-        
+
         # Build variant-to-manufacturer mapping
         variant_to_manufacturer = self._build_variant_to_manufacturer_mapping()
-        
+
         # Enhanced class names
         enhanced_classes = []
-        
+
         for variant in self.classes:
             # Check if variant already contains manufacturer info
             manufacturer = variant_to_manufacturer.get(variant, None)
-            
+
             if manufacturer is None:
                 # No manufacturer found, keep original
                 enhanced_classes.append(variant)
@@ -1095,11 +1109,11 @@ class FGVCAircraftCL(ContinualDataset):
                     # Add manufacturer prefix
                     enhanced_name = f"{manufacturer} {variant}"
                     enhanced_classes.append(enhanced_name)
-        
+
         # Update classes and class_to_idx
         self.classes = enhanced_classes
         self.class_to_idx = {cls: idx for idx, cls in enumerate(self.classes)}
-        
+
         # Also update the underlying datasets to keep consistency
         self.dataset_train.classes = enhanced_classes
         self.dataset_train.class_to_idx = self.class_to_idx
@@ -1130,7 +1144,7 @@ class FGVCAircraftCL(ContinualDataset):
         # Set classes and class_to_idx from the train dataset
         self.classes = self.dataset_train.classes
         self.class_to_idx = self.dataset_train.class_to_idx
-        
+
         # Enhance class names with manufacturer info for variant level
         self._enhance_class_names_with_manufacturer()
 
@@ -1205,13 +1219,16 @@ class ImageNetCL(ContinualDataset):
 
         # Set classes and class_to_idx from the train dataset
         # Note: ImageNet.classes is a list of tuples, we need to extract class names
-        self.classes = [cls[0] if isinstance(cls, tuple) else cls for cls in self.dataset_train.classes]
+        self.classes = [
+            cls[0] if isinstance(cls, tuple) else cls
+            for cls in self.dataset_train.classes
+        ]
         self.class_to_idx = {cls: idx for idx, cls in enumerate(self.classes)}
 
 
 class ImageNet100CL(ContinualDataset):
     """ImageNet-100 subset for continual learning.
-    
+
     Uses a predefined 100-class subset of ImageNet with split files.
     """
 
@@ -1260,13 +1277,13 @@ class ImageNet100CL(ContinualDataset):
         # Check if dataset exists
         imagenet_path = os.path.join(self.root, "imagenet")
         split_path = os.path.join(self.root, "imagenet-100")
-        
+
         if not os.path.exists(imagenet_path):
             raise ValueError(
                 "ImageNet dataset not found. "
                 "Please download ImageNet and place it at {}".format(imagenet_path)
             )
-        
+
         if not os.path.exists(split_path):
             raise ValueError(
                 "ImageNet-100 split files not found. "
@@ -1311,7 +1328,7 @@ class ImageNet100CL(ContinualDataset):
         for img_path, label in zip(train_images, train_targets):
             if label not in idx_to_synset:
                 # Extract synset ID from path (e.g., train/n01440764/...)
-                synset_id = img_path.split('/')[-2]
+                synset_id = img_path.split("/")[-2]
                 idx_to_synset[label] = synset_id
                 # Stop once we've found all unique classes
                 if len(idx_to_synset) == self.num_classes:
@@ -1326,11 +1343,15 @@ class ImageNet100CL(ContinualDataset):
         # Use torchvision's ImageNet metadata
         imagenet_dataset = tv_datasets.ImageNet(root=imagenet_path, split="train")
         # Create mapping from wnid to class name
-        wnid_to_class = {wnid: cls[0] if isinstance(cls, tuple) else cls 
-                       for wnid, cls in zip(imagenet_dataset.wnids, imagenet_dataset.classes)}
-        
+        wnid_to_class = {
+            wnid: cls[0] if isinstance(cls, tuple) else cls
+            for wnid, cls in zip(imagenet_dataset.wnids, imagenet_dataset.classes)
+        }
+
         # Map our 100 classes using the synset IDs
-        self.classes = [wnid_to_class[idx_to_synset[i]] for i in range(self.num_classes)]
+        self.classes = [
+            wnid_to_class[idx_to_synset[i]] for i in range(self.num_classes)
+        ]
 
         self.class_to_idx = {cls: idx for idx, cls in enumerate(self.classes)}
 
@@ -1404,9 +1425,11 @@ class ImageNetRCL(ContinualDataset):
             # Class names start at line 14 (index 13)
             for line in lines[13:]:
                 parts = line.strip().split()
-                if len(parts) >= 2 and parts[0].startswith('n'):
+                if len(parts) >= 2 and parts[0].startswith("n"):
                     synset_id = parts[0]
-                    class_name = '_'.join(parts[1:])  # Join in case class name has spaces
+                    class_name = "_".join(
+                        parts[1:]
+                    )  # Join in case class name has spaces
                     synset_to_name[synset_id] = class_name
 
         # ImageNet-R follows the ImageFolder structure, but doesn't have a train/test split
@@ -1416,8 +1439,13 @@ class ImageNetRCL(ContinualDataset):
 
         # Map ImageFolder classes (synset IDs) to human-readable names
         # ImageFolder.classes contains directory names (synset IDs) in sorted order
-        self.classes = [synset_to_name.get(synset_id, synset_id) for synset_id in train_dataset.classes]
-        self.class_to_idx = {class_name: idx for idx, class_name in enumerate(self.classes)}
+        self.classes = [
+            synset_to_name.get(synset_id, synset_id)
+            for synset_id in train_dataset.classes
+        ]
+        self.class_to_idx = {
+            class_name: idx for idx, class_name in enumerate(self.classes)
+        }
 
         # Create train/test split
         class_indices = defaultdict(list)
@@ -1503,9 +1531,11 @@ class ImageNetACL(ContinualDataset):
             # Class names start at line 13 (index 12)
             for line in lines[12:]:
                 parts = line.strip().split(maxsplit=1)  # Split only on first space
-                if len(parts) >= 2 and parts[0].startswith('n'):
+                if len(parts) >= 2 and parts[0].startswith("n"):
                     synset_id = parts[0]
-                    class_name = parts[1].replace(' ', '_')  # Replace spaces with underscores
+                    class_name = parts[1].replace(
+                        " ", "_"
+                    )  # Replace spaces with underscores
                     synset_to_name[synset_id] = class_name
 
         # ImageNet-A follows the ImageFolder structure, but doesn't have a train/test split
@@ -1515,8 +1545,13 @@ class ImageNetACL(ContinualDataset):
 
         # Map ImageFolder classes (synset IDs) to human-readable names
         # ImageFolder.classes contains directory names (synset IDs) in sorted order
-        self.classes = [synset_to_name.get(synset_id, synset_id) for synset_id in train_dataset.classes]
-        self.class_to_idx = {class_name: idx for idx, class_name in enumerate(self.classes)}
+        self.classes = [
+            synset_to_name.get(synset_id, synset_id)
+            for synset_id in train_dataset.classes
+        ]
+        self.class_to_idx = {
+            class_name: idx for idx, class_name in enumerate(self.classes)
+        }
 
         # Create train/test split
         class_indices = defaultdict(list)
@@ -1555,6 +1590,15 @@ class DomainNetCL(ContinualDataset):
 
     For class-incremental learning, we use all domains but split classes.
     For domain-incremental learning, we use all classes but split domains.
+    For cross-domain class-incremental learning, each task uses one domain with disjoint classes.
+
+    Cross-domain class-incremental example (6 tasks, ~57 classes per domain):
+    - Task 1 (clipart): Classes 0-56
+    - Task 2 (infograph): Classes 57-113
+    - Task 3 (painting): Classes 114-170
+    - Task 4 (quickdraw): Classes 171-227
+    - Task 5 (real): Classes 228-284
+    - Task 6 (sketch): Classes 285-344
     """
 
     def __init__(
@@ -1569,7 +1613,7 @@ class DomainNetCL(ContinualDataset):
         download: bool = True,
         seed: int = 42,
         class_order: Optional[List[int]] = None,
-        mode: str = "class",  # "class" or "domain"
+        mode: str = "class",  # "class", "domain", or "cross_domain"
         domains: Optional[List[str]] = None,
     ):
         """
@@ -1584,7 +1628,8 @@ class DomainNetCL(ContinualDataset):
             download: Whether to download the dataset (not implemented)
             seed: Random seed for reproducibility
             class_order: Specific order of classes (if None, random order is used)
-            mode: Learning mode, either "class" for class-incremental or "domain" for domain-incremental
+            mode: Learning mode - "class" (class-incremental), "domain" (domain-incremental),
+                  or "cross_domain" (cross-domain class-incremental: one domain per task with disjoint classes)
             domains: List of domains to use (if None, uses all domains)
         """
         super().__init__(
@@ -1620,9 +1665,11 @@ class DomainNetCL(ContinualDataset):
                     )
             self.domains = domains
 
-        # Set mode (class-incremental or domain-incremental)
-        if mode not in ["class", "domain"]:
-            raise ValueError(f"Invalid mode: {mode}. Must be 'class' or 'domain'")
+        # Set mode (class-incremental, domain-incremental, or cross-domain)
+        if mode not in ["class", "domain", "cross_domain"]:
+            raise ValueError(
+                f"Invalid mode: {mode}. Must be 'class', 'domain', or 'cross_domain'"
+            )
         self.mode = mode
 
         # For domain-incremental learning, ensure num_steps is valid
@@ -1632,8 +1679,18 @@ class DomainNetCL(ContinualDataset):
                     f"For domain-incremental learning, num_steps ({num_steps}) cannot exceed the number of domains ({len(self.domains)})"
                 )
 
+        # For cross-domain learning, num_steps must equal number of domains
+        if self.mode == "cross_domain":
+            if num_steps != len(self.domains):
+                raise ValueError(
+                    f"For cross-domain learning, num_steps ({num_steps}) must equal the number of domains ({len(self.domains)})"
+                )
+
         # DomainNet has 345 classes
-        self.num_classes = 345 if self.mode == "class" else len(self.domains)
+        if self.mode in ["class", "cross_domain"]:
+            self.num_classes = 345
+        else:  # domain mode
+            self.num_classes = len(self.domains)
 
         # Set class order (either provided or random)
         if class_order is None:
@@ -1651,6 +1708,32 @@ class DomainNetCL(ContinualDataset):
             np.random.shuffle(domain_indices)
             self.domain_order = [self.domains[i] for i in domain_indices]
 
+        # For cross-domain learning, assign disjoint classes to each domain
+        if self.mode == "cross_domain":
+            # Shuffle domains for random task order
+            domain_indices = list(range(len(self.domains)))
+            np.random.shuffle(domain_indices)
+            self.domain_order = [self.domains[i] for i in domain_indices]
+
+            # Shuffle class order for random class assignment
+            shuffled_classes = list(range(self.num_classes))
+            np.random.shuffle(shuffled_classes)
+
+            # Calculate classes per domain (distribute 345 classes across 6 domains)
+            # Split: 58, 58, 58, 58, 58, 55
+            num_domains = len(self.domains)
+
+            # Create mapping: domain -> set of classes (randomized)
+            self.domain_classes = {}
+            current_idx = 0
+            for i, domain in enumerate(self.domain_order):
+                # First 5 domains get 58 classes, last domain gets 55
+                n_classes = 58 if i < num_domains - 1 else 55
+                self.domain_classes[domain] = set(
+                    shuffled_classes[current_idx : current_idx + n_classes]
+                )
+                current_idx += n_classes
+
         self.setup()
 
     def setup(self):
@@ -1667,8 +1750,11 @@ class DomainNetCL(ContinualDataset):
         if self.mode == "class":
             self._setup_class_incremental(dataset_path)
         # For domain-incremental learning, we load all classes but split domains
-        else:
+        elif self.mode == "domain":
             self._setup_domain_incremental(dataset_path)
+        # For cross-domain class-incremental learning
+        else:  # cross_domain
+            self._setup_cross_domain_incremental(dataset_path)
 
     def _setup_class_incremental(self, dataset_path):
         """Setup for class-incremental learning (all domains, split classes)."""
@@ -1729,6 +1815,46 @@ class DomainNetCL(ContinualDataset):
             test_images, test_targets, transform=self.test_transform
         )
 
+    def _setup_cross_domain_incremental(self, dataset_path):
+        """Setup for cross-domain class-incremental learning.
+
+        Each domain gets a disjoint set of randomly assigned classes.
+        With 6 domains: 5 domains get 58 classes, 1 domain gets 55 classes.
+        Classes are randomly shuffled and assigned to domains.
+        """
+        train_images, train_targets = [], []
+        test_images, test_targets = [], []
+
+        # Load data from each domain, but only keep classes assigned to that domain
+        for domain in self.domain_order:
+            valid_classes = self.domain_classes[domain]
+
+            domain_train_images, domain_train_targets = self._load_domain_data(
+                dataset_path, domain, "train"
+            )
+            domain_test_images, domain_test_targets = self._load_domain_data(
+                dataset_path, domain, "test"
+            )
+
+            # Filter to only include images from the assigned classes
+            for img, target in zip(domain_train_images, domain_train_targets):
+                if target in valid_classes:
+                    train_images.append(img)
+                    train_targets.append(target)
+
+            for img, target in zip(domain_test_images, domain_test_targets):
+                if target in valid_classes:
+                    test_images.append(img)
+                    test_targets.append(target)
+
+        # Create datasets
+        self.dataset_train = ImageListDataset(
+            train_images, train_targets, transform=self.transform
+        )
+        self.dataset_test = ImageListDataset(
+            test_images, test_targets, transform=self.test_transform
+        )
+
     def _load_domain_data(self, dataset_path, domain, split):
         """Load data for a specific domain and split.
 
@@ -1775,18 +1901,23 @@ class DomainNetCL(ContinualDataset):
 
         For class-incremental learning, returns a subset of classes.
         For domain-incremental learning, returns domains for the step.
+        For cross-domain learning, returns the classes assigned to the domain for this step.
         """
         if self.mode == "class":
             # Class-incremental: return subset of classes
             start_idx = step * self.classes_per_step
             end_idx = min((step + 1) * self.classes_per_step, self.num_classes)
             return [self.class_order[i] for i in range(start_idx, end_idx)]
-        else:
+        elif self.mode == "domain":
             # Domain-incremental: return domains for this step
             start_idx = step * self.classes_per_step
             end_idx = min((step + 1) * self.classes_per_step, len(self.domains))
             domain_indices = [self.class_order[i] for i in range(start_idx, end_idx)]
             return domain_indices
+        else:  # cross_domain
+            # Cross-domain: return the classes assigned to the domain for this step
+            domain = self.domain_order[step]
+            return sorted(list(self.domain_classes[domain]))
 
 
 class ObjectNetCL(ContinualDataset):
