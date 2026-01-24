@@ -1,0 +1,21 @@
+name: vit_small_patch16_224.augreg_in21k
+source: timm  # Options: timm, openclip
+pretrained: true
+freeze_backbone: false  # Whether to freeze the backbone during training
+freeze_classifier: false  # Whether to freeze the classifier during training
+feature_dim: 384  # Feature dimension for ViT small
+skip_blocks: 0  # Number of final transformer blocks to skip
+skip_final_norm: false  # Whether to skip final norm layer after transformer blocks, before head
+classifier:
+  type: linear  # Options: linear, mlp
+  hidden_dim: 512  # Only used if type is mlp
+  dropout: 0.1
+  normalize: false
+  temperature: 1.0
+  learnable_temperature: false
+  use_log_temperature: false  # Whether to parameterize temperature in log space for better optimization stability
+sae:
+  use_sae: false
+  checkpoint_path: "/path/to/your/sae_checkpoint.pt"
+  layer: -2  # Apply SAE to the second-to-last transformer layer
+  token_type: all  # Apply SAE to 'patch', 'cls', or 'all'
