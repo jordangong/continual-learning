@@ -1,4 +1,4 @@
-name: vit_large_patch14_224.augreg_in21k
+name: vit_large_patch16_224.augreg_in21k
 source: timm  # Options: timm, openclip
 pretrained: true
 freeze_backbone: false  # Whether to freeze the backbone during training
